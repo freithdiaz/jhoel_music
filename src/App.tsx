@@ -883,23 +883,31 @@ export default function App() {
     }
   };
 
-  const selectTrack = (index: number) => {
-    if (index < 0 || index >= tracks.length) return;
+  const playSong = (track: Track) => {
+    if (!track) return;
     setUseSynthFallback(false);
     setActiveAudioSource('music');
-    setCurrentTrackIndex(index);
+    setIsPlaying(true);
     setCurrentTime(0);
     setLoopA(null);
     setLoopB(null);
-    setIsPlaying(true);
 
-    const selected = tracks[index];
+    setTracks((prev) => {
+      const idx = prev.findIndex((t) => t.id === track.id);
+      if (idx !== -1) {
+        setCurrentTrackIndex(idx);
+        return prev;
+      }
+      setCurrentTrackIndex(0);
+      return [track, ...prev];
+    });
+
     setScrobbleHistory((prev) => [
       {
-        title: selected.title,
-        artist: selected.artist,
+        title: track.title,
+        artist: track.artist,
         time: 'Ahora mismo',
-        match: calculateAffinityScore(selected)
+        match: calculateAffinityScore(track)
       },
       ...prev.slice(0, 7)
     ]);
@@ -909,12 +917,25 @@ export default function App() {
     }
 
     if (audioRef.current) {
-      audioRef.current.src = selected.audioUrl;
+      audioRef.current.src = track.audioUrl;
       audioRef.current.load();
       audioRef.current.play().catch((err) => {
-        console.warn('Error al reproducir pista seleccionada:', err);
+        console.warn('Playback retry on playSong:', err);
+        setTimeout(() => {
+          if (audioRef.current) {
+            audioRef.current.load();
+            audioRef.current.play().catch(console.warn);
+          }
+        }, 150);
       });
     }
+
+    showToast(`Reproduciendo: ${track.title}`);
+  };
+
+  const selectTrack = (index: number) => {
+    if (index < 0 || index >= tracks.length) return;
+    playSong(tracks[index]);
   };
 
   const handleTimeUpdate = () => {
@@ -932,11 +953,15 @@ export default function App() {
 
   // Algoritmo de Afinidad Musical
   const calculateAffinityScore = (track: Track) => {
-    const energyDiff = Math.abs(track.energy - algoEnergyTarget);
-    const acousticDiff = Math.abs(track.acousticness - algoAcousticTarget);
-    const bpmDiff = Math.min(50, Math.abs(track.bpm - algoBpmTarget));
+    if (!track) return 80;
+    const energy = typeof track.energy === 'number' ? track.energy : 75;
+    const acoustic = typeof track.acousticness === 'number' ? track.acousticness : 30;
+    const bpm = typeof track.bpm === 'number' && track.bpm > 0 ? track.bpm : 120;
+    const energyDiff = Math.abs(energy - algoEnergyTarget);
+    const acousticDiff = Math.abs(acoustic - algoAcousticTarget);
+    const bpmDiff = Math.min(50, Math.abs(bpm - algoBpmTarget));
     const rawScore = 100 - (energyDiff * 0.35 + acousticDiff * 0.25 + bpmDiff * 0.4);
-    return Math.max(45, Math.min(99, Math.round(rawScore)));
+    return Math.max(45, Math.min(99, Math.round(rawScore || 80)));
   };
 
   const handleNextTrack = () => {
@@ -1189,9 +1214,9 @@ export default function App() {
         if (!searchQuery.trim()) return true;
         const q = searchQuery.toLowerCase();
         return (
-          t.title.toLowerCase().includes(q) ||
-          t.artist.toLowerCase().includes(q) ||
-          t.genre.toLowerCase().includes(q)
+          (t.title || '').toLowerCase().includes(q) ||
+          (t.artist || '').toLowerCase().includes(q) ||
+          (t.genre || '').toLowerCase().includes(q)
         );
       })
       .map((t) => ({
@@ -1239,6 +1264,10 @@ export default function App() {
           } else {
             setDuration(0);
           }
+        }}
+        onError={(e) => {
+          const err = (e.target as HTMLAudioElement).error;
+          console.warn('Audio error:', err?.code, err?.message);
         }}
         onEnded={() => {
           if (activeAudioSource === 'music') {
@@ -2172,11 +2201,7 @@ export default function App() {
                   {onlineSearchResults.map((track) => (
                     <div
                       key={track.id}
-                      onClick={() => {
-                        setTracks((prev) => [track, ...prev]);
-                        selectTrack(0);
-                        showToast(`Reproduciendo: ${track.title}`);
-                      }}
+                      onClick={() => playSong(track)}
                       className="group flex items-center justify-between p-2.5 rounded-xl border border-transparent hover:border-zinc-700 bg-zinc-900/50 hover:bg-zinc-800/60 cursor-pointer transition"
                     >
                       <div className="flex items-center gap-3 min-w-0">
@@ -2302,11 +2327,7 @@ export default function App() {
                   {jamendoTracks.map((track) => (
                     <div
                       key={track.id}
-                      onClick={() => {
-                        setTracks((prev) => [track, ...prev]);
-                        selectTrack(0);
-                        showToast(`Reproduciendo Jamendo: ${track.title}`);
-                      }}
+                      onClick={() => playSong(track)}
                       className="group flex items-center justify-between p-2.5 rounded-xl border border-zinc-800/80 hover:border-cyan-500/50 bg-zinc-900/60 hover:bg-zinc-800/70 cursor-pointer transition"
                     >
                       <div className="flex items-center gap-3 min-w-0 flex-1">

@@ -50,7 +50,8 @@ YDL_STREAM_OPTS = {
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
-    'skip_download': True
+    'skip_download': True,
+    'js_runtimes': {'node': {}}
 }
 
 def get_stream_url(video_id: str) -> str:
@@ -122,15 +123,26 @@ def search_online(q: str = Query(..., description="Nombre de la canción o artis
 
                 results.append({
                     "id": f"yt-{video_id}",
-                    "title": title,
-                    "artist": uploader,
+                    "title": title or "Pista de Audio",
+                    "artist": uploader or "Artista",
                     "album": "Audio Oficial Completo (Sin límite 30s)",
                     "duration": duration,
                     "bpm": 120,
                     "keySignature": "C Major",
+                    "energy": 80,
+                    "acousticness": 25,
+                    "danceability": 80,
+                    "genre": "Música Universal",
                     "coverUrl": thumbnail,
                     "audioUrl": f"/stream_yt?v={video_id}",
-                    "sourceType": "invidious"
+                    "sourceType": "invidious",
+                    "cachedOffline": False,
+                    "liked": False,
+                    "lyrics": [
+                        {"time": 0, "text": f"♪ Reproduciendo: {title} ♪"},
+                        {"time": 8, "text": "Audio completo sin límite de 30 segundos"},
+                        {"time": 25, "text": "Procesado en tiempo real con ecualizador DSP"}
+                    ]
                 })
             return results
     except Exception as e:

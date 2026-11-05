@@ -82,9 +82,23 @@ export async function searchFreeMusicOnline(query: string, fastApiBaseUrl?: stri
         const items = await serverRes.json();
         if (Array.isArray(items) && items.length > 0) {
           return items.map((it: any) => ({
-            ...it,
+            id: it.id || `yt-${Math.random()}`,
+            title: it.title || 'Canción',
+            artist: it.artist || 'Artista',
+            album: it.album || 'Álbum Oficial',
+            duration: it.duration || 180,
+            bpm: it.bpm || 120,
+            keySignature: it.keySignature || 'C Major',
+            energy: it.energy ?? 80,
+            acousticness: it.acousticness ?? 25,
+            danceability: it.danceability ?? 80,
+            genre: it.genre || 'Música Online',
+            coverUrl: it.coverUrl || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80',
             audioUrl: it.audioUrl.startsWith('http') ? it.audioUrl : `${fastApiBaseUrl}${it.audioUrl}`,
-            lyrics: [
+            sourceType: it.sourceType || 'invidious',
+            cachedOffline: false,
+            liked: false,
+            lyrics: it.lyrics || [
               { time: 0, text: `♪ Reproduciendo en vivo: ${it.title} ♪` },
               { time: 10, text: `Transmitido directamente desde internet por el motor yt-dlp` },
               { time: 30, text: `Sin descargas previas • Calidad Directa de Estudio` }
