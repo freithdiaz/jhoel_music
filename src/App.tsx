@@ -31,6 +31,12 @@ import {
   fetchTrendingJamendo,
   JAMENDO_GENRES
 } from './services/jamendoApi';
+import {
+  DEFAULT_RADIO_STATIONS,
+  fetchStationsByCountry,
+  searchRadioStations,
+  RADIO_COUNTRIES
+} from './services/radioApi';
 
 // ==========================================
 // CATÁLOGO INICIAL CURADO
@@ -288,6 +294,95 @@ export default function App() {
     });
   };
 
+  // ==========================================
+  // ESTADO DE REPRODUCCIÓN SEPARADO (MÚSICA vs RADIO)
+  // ==========================================
+  const [activeAudioSource, setActiveAudioSource] = useState<'music' | 'radio'>('music');
+  const [currentRadioStation, setCurrentRadioStation] = useState<Track>(DEFAULT_RADIO_STATIONS[0]);
+
+  // ==========================================
+  // RADIO BROWSER API & EMISORAS EN VIVO (FM/AM)
+  // ==========================================
+  const [radioStations, setRadioStations] = useState<Track[]>(DEFAULT_RADIO_STATIONS);
+  const [selectedRadioCountry, setSelectedRadioCountry] = useState('CO');
+  const [radioSearchQuery, setRadioSearchQuery] = useState('');
+  const [isLoadingRadio, setIsLoadingRadio] = useState(false);
+
+  // Cargar emisoras por país seleccionado
+  const handleSelectRadioCountry = async (countryCode: string) => {
+    setSelectedRadioCountry(countryCode);
+    setIsLoadingRadio(true);
+    try {
+      const results = await fetchStationsByCountry(countryCode, 40);
+      if (countryCode === 'CO') {
+        const defaultsIds = new Set(DEFAULT_RADIO_STATIONS.map((s) => s.id));
+        const customUnique = results.filter((r) => !defaultsIds.has(r.id));
+        setRadioStations([...DEFAULT_RADIO_STATIONS, ...customUnique]);
+      } else {
+        setRadioStations(results.length > 0 ? results : DEFAULT_RADIO_STATIONS);
+      }
+    } catch (err) {
+      console.warn('Error cargando emisoras de radio:', err);
+    } finally {
+      setIsLoadingRadio(false);
+    }
+  };
+
+  // Buscar emisoras en Radio Browser
+  const handleSearchRadio = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (!radioSearchQuery.trim()) {
+      handleSelectRadioCountry(selectedRadioCountry);
+      return;
+    }
+    setIsLoadingRadio(true);
+    try {
+      const results = await searchRadioStations(radioSearchQuery, selectedRadioCountry);
+      if (results.length > 0) {
+        setRadioStations(results);
+        showToast(`Se encontraron ${results.length} emisoras para "${radioSearchQuery}"`);
+      } else {
+        showToast(`No se encontraron emisoras con "${radioSearchQuery}"`);
+      }
+    } catch (err) {
+      console.warn('Error buscando emisoras:', err);
+    } finally {
+      setIsLoadingRadio(false);
+    }
+  };
+
+  // Sintonizar emisora de radio con 0 cortes (Sin mezclar con la lista de canciones)
+  const playRadioStation = (station: Track) => {
+    setUseSynthFallback(false);
+    setActiveAudioSource('radio');
+    setCurrentRadioStation(station);
+    setIsPlaying(true);
+    setCurrentTime(0);
+    setDuration(0);
+    setLoopA(null);
+    setLoopB(null);
+
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume();
+    }
+
+    if (audioRef.current) {
+      audioRef.current.src = station.audioUrl;
+      audioRef.current.load();
+      audioRef.current.play().catch((err) => {
+        console.warn('Reintentando conexión con emisora:', err);
+        setTimeout(() => {
+          if (audioRef.current) {
+            audioRef.current.load();
+            audioRef.current.play().catch(console.warn);
+          }
+        }, 150);
+      });
+    }
+
+    showToast(`🔴 Sintonizando en vivo: ${station.title}`);
+  };
+
   // Servidor FastAPI Local (Auto-detección según el host)
   const defaultHost = typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : 'localhost';
   const [fastApiUrl, setFastApiUrl] = useState(`http://${defaultHost}:8000`);
@@ -322,7 +417,8 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const synthIntervalRef = useRef<any>(null);
 
-  const currentTrack = tracks[currentTrackIndex] || tracks[0] || INITIAL_TRACKS[0];
+  const currentMusicTrack = tracks[currentTrackIndex] || tracks[0] || INITIAL_TRACKS[0];
+  const currentTrack = activeAudioSource === 'radio' ? currentRadioStation : currentMusicTrack;
 
   const showToast = (msg: string) => {
     setNotification(msg);
@@ -779,16 +875,18 @@ export default function App() {
     } else {
       audioRef.current.play().then(() => {
         setIsPlaying(true);
-      }).catch(() => {
-        setUseSynthFallback(true);
-        setIsPlaying(true);
-        showToast('Sintetizador WebAudio Procedural Activado');
+      }).catch((err) => {
+        console.warn('Reintentando play:', err);
+        audioRef.current?.load();
+        audioRef.current?.play().then(() => setIsPlaying(true)).catch(console.warn);
       });
     }
   };
 
   const selectTrack = (index: number) => {
     if (index < 0 || index >= tracks.length) return;
+    setUseSynthFallback(false);
+    setActiveAudioSource('music');
     setCurrentTrackIndex(index);
     setCurrentTime(0);
     setLoopA(null);
@@ -806,13 +904,17 @@ export default function App() {
       ...prev.slice(0, 7)
     ]);
 
-    setTimeout(() => {
-      if (audioRef.current && !useSynthFallback) {
-        audioRef.current.play().catch(() => {
-          setUseSynthFallback(true);
-        });
-      }
-    }, 80);
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume();
+    }
+
+    if (audioRef.current) {
+      audioRef.current.src = selected.audioUrl;
+      audioRef.current.load();
+      audioRef.current.play().catch((err) => {
+        console.warn('Error al reproducir pista seleccionada:', err);
+      });
+    }
   };
 
   const handleTimeUpdate = () => {
@@ -951,6 +1053,7 @@ export default function App() {
   // ==========================================
   const executeOnlineSearch = async (query: string) => {
     if (!query || query.trim().length < 2) return;
+    setActiveTab('search');
     setIsSearchingOnline(true);
     try {
       const results = await searchFreeMusicOnline(query, fastApiUrl);
@@ -1130,8 +1233,18 @@ export default function App() {
         src={currentTrack.audioUrl}
         crossOrigin="anonymous"
         onTimeUpdate={handleTimeUpdate}
-        onLoadedMetadata={(e) => setDuration((e.target as HTMLAudioElement).duration || currentTrack.duration)}
-        onEnded={handleNextTrack}
+        onLoadedMetadata={(e) => {
+          if (activeAudioSource === 'music') {
+            setDuration((e.target as HTMLAudioElement).duration || currentTrack.duration);
+          } else {
+            setDuration(0);
+          }
+        }}
+        onEnded={() => {
+          if (activeAudioSource === 'music') {
+            handleNextTrack();
+          }
+        }}
       />
 
       {/* TOAST DE NOTIFICACIÓN FLOTANTE */}
@@ -1250,7 +1363,8 @@ export default function App() {
           <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-3 space-y-1">
             {[
               { id: 'home', label: 'Catálogo & Tendencias', icon: ListMusic, badge: tracks.length },
-              { id: 'jamendo', label: 'Jamendo Oficial (Full)', icon: Radio, badge: '600k' },
+              { id: 'radio', label: 'Radio en Vivo (FM/AM)', icon: Radio, badge: '🔴 LIVE' },
+              { id: 'jamendo', label: 'Jamendo Oficial (Full)', icon: Disc, badge: '600k' },
               { id: 'search', label: 'Búsqueda Libre Online', icon: Globe, badge: 'Universal' },
               { id: 'vault', label: 'Bóveda Offline (Sin DRM)', icon: ShieldCheck, badge: tracks.filter((t) => t.cachedOffline).length },
               { id: 'dsp-studio', label: 'Estudio DSP & 5-Band EQ', icon: Sliders, badge: '8D Audio' },
@@ -1285,210 +1399,647 @@ export default function App() {
             })}
           </div>
 
-          {/* PANEL DE CONTROL DEL ALGORITMO DE RECOMENDACIÓN */}
-          <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 space-y-3.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Compass className={`w-4 h-4 ${accentClasses.text}`} />
-                <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-                  Algoritmo Diaz IA
-                </h2>
-              </div>
-              <button
-                onClick={() => setAutoRadioEnabled(!autoRadioEnabled)}
-                className={`text-[11px] px-2.5 py-0.5 rounded-full font-semibold border transition ${
-                  autoRadioEnabled
-                    ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
-                    : 'bg-zinc-800 border-zinc-700 text-zinc-400'
-                }`}
-              >
-                {autoRadioEnabled ? 'Auto-Radio IA ON' : 'Manual'}
-              </button>
-            </div>
-            <p className="text-xs text-zinc-400 leading-relaxed">
-              Tú controlas qué música te recomienda tu plataforma:
-            </p>
-
-            <div className="space-y-3 pt-1">
-              <div>
-                <div className="flex justify-between text-xs mb-1">
-                  <span className="text-zinc-400">Energía deseada</span>
-                  <span className="font-mono font-bold text-zinc-200">{algoEnergyTarget}%</span>
+          {/* PANEL IZQUIERDO: DIAL FM MEDELLÍN (SI ES RADIO) O ALGORITMO IA (SI ES MÚSICA) */}
+          {activeTab === 'radio' ? (
+            <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 space-y-3.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Radio className="w-4 h-4 text-red-400 animate-pulse" />
+                  <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+                    Dial FM Medellín
+                  </h2>
                 </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  value={algoEnergyTarget}
-                  onChange={(e) => setAlgoEnergyTarget(Number(e.target.value))}
-                  className="w-full accent-emerald-500 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
-                />
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-red-950/80 border border-red-500/30 text-red-400 font-bold">
+                  EN VIVO
+                </span>
               </div>
+              <p className="text-xs text-zinc-400">
+                Sintoniza al instante las frecuencias de mayor audiencia en Antioquia:
+              </p>
 
-              <div>
-                <div className="flex justify-between text-xs mb-1">
-                  <span className="text-zinc-400">Nivel Acústico</span>
-                  <span className="font-mono font-bold text-zinc-200">{algoAcousticTarget}%</span>
-                </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  value={algoAcousticTarget}
-                  onChange={(e) => setAlgoAcousticTarget(Number(e.target.value))}
-                  className="w-full accent-emerald-500 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
-                />
-              </div>
-
-              <div>
-                <div className="flex justify-between text-xs mb-1">
-                  <span className="text-zinc-400">Tempo (BPM)</span>
-                  <span className="font-mono font-bold text-zinc-200">{algoBpmTarget} BPM</span>
-                </div>
-                <input
-                  type="range"
-                  min="60"
-                  max="180"
-                  value={algoBpmTarget}
-                  onChange={(e) => setAlgoBpmTarget(Number(e.target.value))}
-                  className="w-full accent-emerald-500 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
-                />
+              <div className="space-y-1.5 pt-1">
+                {DEFAULT_RADIO_STATIONS.map((st) => {
+                  const isCurrent = activeAudioSource === 'radio' && currentRadioStation.id === st.id && isPlaying;
+                  return (
+                    <button
+                      key={st.id}
+                      onClick={() => playRadioStation(st)}
+                      className={`w-full flex items-center justify-between p-2.5 rounded-xl text-xs transition ${
+                        isCurrent
+                          ? 'bg-red-500/20 border border-red-500/50 text-red-300 font-bold shadow-sm'
+                          : 'bg-zinc-900/60 hover:bg-zinc-850 text-zinc-300 border border-zinc-800/60'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2.5 truncate">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-500 shrink-0" />
+                        <span className="truncate">{st.title}</span>
+                      </div>
+                      {isCurrent ? (
+                        <Activity className="w-3.5 h-3.5 text-red-400 animate-pulse shrink-0" />
+                      ) : (
+                        <Play className="w-3 h-3 text-zinc-500 shrink-0" />
+                      )}
+                    </button>
+                  );
+                })}
               </div>
             </div>
+          ) : (
+            <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 space-y-3.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Compass className={`w-4 h-4 ${accentClasses.text}`} />
+                  <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+                    Algoritmo Diaz IA
+                  </h2>
+                </div>
+                <button
+                  onClick={() => setAutoRadioEnabled(!autoRadioEnabled)}
+                  className={`text-[11px] px-2.5 py-0.5 rounded-full font-semibold border transition ${
+                    autoRadioEnabled
+                      ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
+                      : 'bg-zinc-800 border-zinc-700 text-zinc-400'
+                  }`}
+                >
+                  {autoRadioEnabled ? 'Auto-Radio IA ON' : 'Manual'}
+                </button>
+              </div>
+              <p className="text-xs text-zinc-400 leading-relaxed">
+                Tú controlas qué música te recomienda tu plataforma:
+              </p>
 
-            {/* Historial Scrobble */}
-            <div className="pt-2 border-t border-zinc-800/80">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 block mb-2">
-                Últimos Scrobbles
-              </span>
-              <div className="space-y-1.5 max-h-24 overflow-y-auto pr-1">
-                {scrobbleHistory.map((item, i) => (
-                  <div key={i} className="flex items-center justify-between text-xs bg-zinc-900/70 px-2.5 py-1.5 rounded-lg">
-                    <div className="truncate pr-2">
-                      <p className="font-medium text-zinc-200 truncate">{item.title}</p>
-                      <p className="text-[10px] text-zinc-500">{item.artist}</p>
-                    </div>
-                    <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 ${accentClasses.text}`}>
-                      {item.match}%
-                    </span>
+              <div className="space-y-3 pt-1">
+                <div>
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="text-zinc-400">Energía deseada</span>
+                    <span className="font-mono font-bold text-zinc-200">{algoEnergyTarget}%</span>
                   </div>
-                ))}
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={algoEnergyTarget}
+                    onChange={(e) => setAlgoEnergyTarget(Number(e.target.value))}
+                    className="w-full accent-emerald-500 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="text-zinc-400">Nivel Acústico</span>
+                    <span className="font-mono font-bold text-zinc-200">{algoAcousticTarget}%</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="0"
+                    max="100"
+                    value={algoAcousticTarget}
+                    onChange={(e) => setAlgoAcousticTarget(Number(e.target.value))}
+                    className="w-full accent-emerald-500 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
+                  />
+                </div>
+
+                <div>
+                  <div className="flex justify-between text-xs mb-1">
+                    <span className="text-zinc-400">Tempo (BPM)</span>
+                    <span className="font-mono font-bold text-zinc-200">{algoBpmTarget} BPM</span>
+                  </div>
+                  <input
+                    type="range"
+                    min="60"
+                    max="180"
+                    value={algoBpmTarget}
+                    onChange={(e) => setAlgoBpmTarget(Number(e.target.value))}
+                    className="w-full accent-emerald-500 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
+                  />
+                </div>
+              </div>
+
+              {/* Historial Scrobble */}
+              <div className="pt-2 border-t border-zinc-800/80">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 block mb-2">
+                  Últimos Scrobbles
+                </span>
+                <div className="space-y-1.5 max-h-24 overflow-y-auto pr-1">
+                  {scrobbleHistory.map((item, i) => (
+                    <div key={i} className="flex items-center justify-between text-xs bg-zinc-900/70 px-2.5 py-1.5 rounded-lg">
+                      <div className="truncate pr-2">
+                        <p className="font-medium text-zinc-200 truncate">{item.title}</p>
+                        <p className="text-[10px] text-zinc-500">{item.artist}</p>
+                      </div>
+                      <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 ${accentClasses.text}`}>
+                        {item.match}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
-          </div>
+          )}
         </aside>
 
         {/* COLUMNA CENTRAL (HERO PLAYER + VISUALIZADOR + TABS) */}
         <main className="lg:col-span-6 space-y-4">
-          {/* TARJETA HERO DE REPRODUCCIÓN */}
-          <div className="relative rounded-2xl overflow-hidden border border-zinc-800/90 bg-gradient-to-br from-[#151928] via-[#10121A] to-[#0B0C12] p-5 shadow-xl">
-            <div className="flex flex-col sm:flex-row items-center gap-5 z-10 relative">
-              <div className="relative group shrink-0">
-                <img
-                  src={currentTrack.coverUrl}
-                  alt={currentTrack.title}
-                  className="w-28 h-28 sm:w-32 sm:h-32 rounded-2xl object-cover shadow-2xl border border-white/10"
-                />
-                <button
-                  onClick={togglePlay}
-                  className={`absolute inset-0 m-auto w-12 h-12 rounded-full ${accentClasses.bg} text-black flex items-center justify-center shadow-lg opacity-95 group-hover:scale-105 transition`}
-                >
-                  {isPlaying ? <Pause className="w-6 h-6 fill-current" /> : <Play className="w-6 h-6 fill-current ml-0.5" />}
-                </button>
-              </div>
-
-              <div className="flex-1 text-center sm:text-left min-w-0">
-                <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2 mb-1.5">
-                  <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-zinc-800/90 ${accentClasses.text}`}>
-                    {calculateAffinityScore(currentTrack)}% Afinidad IA
-                  </span>
-                  <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-zinc-800/80 text-zinc-300">
-                    {Math.round(currentTrack.bpm * playbackSpeed)} BPM • {currentTrack.keySignature}
-                  </span>
-                  {currentTrack.cachedOffline && (
-                    <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-950/90 border border-emerald-500/40 text-emerald-300 flex items-center gap-1">
-                      <CheckCircle2 className="w-3 h-3" /> Offline Vault
-                    </span>
-                  )}
-                </div>
-
-                <h2 className="text-xl sm:text-2xl font-extrabold text-white truncate">
-                  {currentTrack.title}
-                </h2>
-                <p className="text-sm text-zinc-400 truncate">
-                  {currentTrack.artist} — <span className="text-zinc-500">{currentTrack.album}</span>
-                </p>
-
-                {/* Presets Rápidos de DJ */}
-                <div className="flex flex-wrap items-center justify-center sm:justify-start gap-1.5 mt-3">
-                  {[
-                    { id: 'normal', label: 'Normal (1.0x)' },
-                    { id: 'slowed', label: 'Slowed + Reverb' },
-                    { id: 'nightcore', label: 'Nightcore (1.25x)' },
-                    { id: 'lofi', label: 'Lo-Fi (1.8kHz)' },
-                    { id: 'bassboost', label: 'Mega Bass (+10dB)' }
-                  ].map((preset) => (
-                    <button
-                      key={preset.id}
-                      onClick={() => applyAudioPreset(preset.id as AudioPreset)}
-                      className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition ${
-                        activePreset === preset.id
-                          ? `${accentClasses.bg} text-black font-bold`
-                          : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300'
-                      }`}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-
-            {/* ESPECTRO DE AUDIO EN CANVAS */}
-            <div className="mt-4 pt-3 border-t border-zinc-800/80">
-              <div className="flex items-center justify-between mb-1.5">
-                <div className="flex items-center gap-2">
-                  <Activity className={`w-3.5 h-3.5 ${accentClasses.text}`} />
-                  <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
-                    Espectro FFT • {activePreset.toUpperCase()} • {playbackSpeed.toFixed(2)}x
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5">
+          {/* TARJETA HERO DE MÚSICA (SOLO VISIBLE EN PESTAÑAS DE MÚSICA) */}
+          {activeTab !== 'radio' && (
+            <div className="relative rounded-2xl overflow-hidden border border-zinc-800/90 bg-gradient-to-br from-[#151928] via-[#10121A] to-[#0B0C12] p-5 shadow-xl">
+              <div className="flex flex-col sm:flex-row items-center gap-5 z-10 relative">
+                <div className="relative group shrink-0">
+                  <img
+                    src={currentMusicTrack.coverUrl}
+                    alt={currentMusicTrack.title}
+                    className="w-28 h-28 sm:w-32 sm:h-32 rounded-2xl object-cover shadow-2xl border border-white/10"
+                  />
                   <button
-                    onClick={() => setUseSynthFallback(!useSynthFallback)}
-                    className={`text-[10px] px-2 py-0.5 rounded border transition ${
-                      useSynthFallback
-                        ? 'bg-amber-500/20 border-amber-400 text-amber-300'
-                        : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
-                    }`}
-                    title="Alternar entre stream MP3 y sintetizador procedural"
+                    onClick={togglePlay}
+                    className={`absolute inset-0 m-auto w-12 h-12 rounded-full ${accentClasses.bg} text-black flex items-center justify-center shadow-lg opacity-95 group-hover:scale-105 transition`}
                   >
-                    {useSynthFallback ? 'Sintetizador Live ON' : 'Audio MP3'}
+                    {isPlaying && activeAudioSource === 'music' ? (
+                      <Pause className="w-6 h-6 fill-current" />
+                    ) : (
+                      <Play className="w-6 h-6 fill-current ml-0.5" />
+                    )}
                   </button>
-                  {(['bars', 'wave', 'circle'] as VisualizerMode[]).map((mode) => (
-                    <button
-                      key={mode}
-                      onClick={() => setVisualizerMode(mode)}
-                      className={`text-[10px] uppercase px-2 py-0.5 rounded ${
-                        visualizerMode === mode ? 'bg-zinc-700 text-white font-bold' : 'bg-zinc-900 text-zinc-500'
-                      }`}
-                    >
-                      {mode}
-                    </button>
-                  ))}
+                </div>
+
+                <div className="flex-1 text-center sm:text-left min-w-0">
+                  <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2 mb-1.5">
+                    <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-zinc-800/90 ${accentClasses.text}`}>
+                      {calculateAffinityScore(currentMusicTrack)}% Afinidad IA
+                    </span>
+                    <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-zinc-800/80 text-zinc-300">
+                      {Math.round(currentMusicTrack.bpm * playbackSpeed)} BPM • {currentMusicTrack.keySignature}
+                    </span>
+                    {currentMusicTrack.cachedOffline && (
+                      <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-950/90 border border-emerald-500/40 text-emerald-300 flex items-center gap-1">
+                        <CheckCircle2 className="w-3 h-3" /> Offline Vault
+                      </span>
+                    )}
+                  </div>
+
+                  <h2 className="text-xl sm:text-2xl font-extrabold text-white truncate">
+                    {currentMusicTrack.title}
+                  </h2>
+                  <p className="text-sm text-zinc-400 truncate">
+                    {currentMusicTrack.artist} — <span className="text-zinc-500">{currentMusicTrack.album}</span>
+                  </p>
+
+                  {/* Presets Rápidos de DJ */}
+                  <div className="flex flex-wrap items-center justify-center sm:justify-start gap-1.5 mt-3">
+                    {[
+                      { id: 'normal', label: 'Normal (1.0x)' },
+                      { id: 'slowed', label: 'Slowed + Reverb' },
+                      { id: 'nightcore', label: 'Nightcore (1.25x)' },
+                      { id: 'lofi', label: 'Lo-Fi (1.8kHz)' },
+                      { id: 'bassboost', label: 'Mega Bass (+10dB)' }
+                    ].map((preset) => (
+                      <button
+                        key={preset.id}
+                        onClick={() => applyAudioPreset(preset.id as AudioPreset)}
+                        className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition ${
+                          activePreset === preset.id
+                            ? `${accentClasses.bg} text-black font-bold`
+                            : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
-              <canvas
-                ref={canvasRef}
-                width={560}
-                height={76}
-                className="w-full h-20 rounded-xl bg-black/40 border border-zinc-800/60"
-              />
+
+              {/* ESPECTRO DE AUDIO EN CANVAS */}
+              <div className="mt-4 pt-3 border-t border-zinc-800/80">
+                <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex items-center gap-2">
+                    <Activity className={`w-3.5 h-3.5 ${accentClasses.text}`} />
+                    <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
+                      Espectro FFT • {activePreset.toUpperCase()} • {playbackSpeed.toFixed(2)}x
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      onClick={() => setUseSynthFallback(!useSynthFallback)}
+                      className={`text-[10px] px-2 py-0.5 rounded border transition ${
+                        useSynthFallback
+                          ? 'bg-amber-500/20 border-amber-400 text-amber-300'
+                          : 'bg-zinc-900 border-zinc-700 text-zinc-400 hover:text-white'
+                      }`}
+                      title="Alternar entre stream MP3 y sintetizador procedural"
+                    >
+                      {useSynthFallback ? 'Sintetizador Live ON' : 'Audio MP3'}
+                    </button>
+                    {(['bars', 'wave', 'circle'] as VisualizerMode[]).map((mode) => (
+                      <button
+                        key={mode}
+                        onClick={() => setVisualizerMode(mode)}
+                        className={`text-[10px] uppercase px-2 py-0.5 rounded ${
+                          visualizerMode === mode ? 'bg-zinc-700 text-white font-bold' : 'bg-zinc-900 text-zinc-500'
+                        }`}
+                      >
+                        {mode}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <canvas
+                  ref={canvasRef}
+                  width={560}
+                  height={76}
+                  className="w-full h-20 rounded-xl bg-black/40 border border-zinc-800/60"
+                />
+              </div>
             </div>
-          </div>
+          )}
 
           {/* VISTAS DINÁMICAS */}
-          {activeTab === 'rea-guide' ? (
+          {activeTab === 'radio' ? (
+            /* PESTAÑA EMISORAS DE RADIO EN VIVO (SECCIÓN 100% EXCLUSIVA RADIO) */
+            <div className="space-y-4">
+              {/* TARJETA HERO TUNER DE LA EMISORA SINTONIZADA */}
+              <div className="relative rounded-2xl overflow-hidden border border-red-500/40 bg-gradient-to-br from-[#1e0f14] via-[#140d12] to-[#0b0c10] p-5 shadow-2xl">
+                <div className="flex flex-col sm:flex-row items-center gap-5 z-10 relative">
+                  <div className="relative group shrink-0">
+                    <img
+                      src={currentRadioStation.coverUrl}
+                      alt={currentRadioStation.title}
+                      className="w-28 h-28 sm:w-32 sm:h-32 rounded-2xl object-cover shadow-2xl border border-red-500/30 ring-2 ring-red-500/20"
+                    />
+                    <button
+                      onClick={() => {
+                        if (activeAudioSource === 'radio' && isPlaying) {
+                          togglePlay();
+                        } else {
+                          playRadioStation(currentRadioStation);
+                        }
+                      }}
+                      className="absolute inset-0 m-auto w-12 h-12 rounded-full bg-red-500 hover:bg-red-400 text-white flex items-center justify-center shadow-lg transition transform active:scale-95"
+                    >
+                      {activeAudioSource === 'radio' && isPlaying ? (
+                        <Pause className="w-6 h-6 fill-current" />
+                      ) : (
+                        <Play className="w-6 h-6 fill-current ml-0.5" />
+                      )}
+                    </button>
+                  </div>
+
+                  <div className="flex-1 text-center sm:text-left min-w-0">
+                    <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2 mb-1.5">
+                      <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-red-500/20 border border-red-500/40 text-red-400 flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
+                        SEÑAL EN DIRECTO 24/7
+                      </span>
+                      <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-zinc-800/90 text-zinc-300">
+                        MP3 Digital HQ • Sin Cortes
+                      </span>
+                    </div>
+
+                    <h2 className="text-xl sm:text-2xl font-black text-white truncate">
+                      {currentRadioStation.title}
+                    </h2>
+                    <p className="text-sm text-zinc-400 truncate mt-0.5">
+                      {currentRadioStation.artist} — <span className="text-zinc-500">{currentRadioStation.album}</span>
+                    </p>
+                    <p className="text-xs text-red-400 font-medium mt-1">
+                      {currentRadioStation.genre}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Espectro FFT de la Radio */}
+                <div className="mt-4 pt-3 border-t border-zinc-800/80">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <div className="flex items-center gap-2">
+                      <Activity className="w-3.5 h-3.5 text-red-400 animate-pulse" />
+                      <span className="text-[11px] font-mono uppercase tracking-wider text-zinc-400">
+                        Monitoreo Frecuencia FM en Vivo
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {(['bars', 'wave', 'circle'] as VisualizerMode[]).map((mode) => (
+                        <button
+                          key={mode}
+                          onClick={() => setVisualizerMode(mode)}
+                          className={`text-[10px] uppercase px-2 py-0.5 rounded ${
+                            visualizerMode === mode ? 'bg-red-500 text-white font-bold' : 'bg-zinc-900 text-zinc-500'
+                          }`}
+                        >
+                          {mode}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <canvas
+                    ref={canvasRef}
+                    width={560}
+                    height={76}
+                    className="w-full h-20 rounded-xl bg-black/40 border border-zinc-800/60"
+                  />
+                </div>
+              </div>
+
+              {/* LISTA DE EMISORAS Y EXPLORADOR MUNDIAL */}
+              <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 sm:p-6 space-y-6">
+              {/* Encabezado */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-zinc-800/80 pb-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-3 rounded-2xl bg-red-500/10 border border-red-500/30 text-red-400">
+                    <Radio className="w-6 h-6 animate-pulse" />
+                  </div>
+                  <div>
+                    <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                      Radio en Vivo FM / AM (Radio Browser)
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500 text-white font-black tracking-wider animate-pulse">
+                        🔴 EN DIRECTO
+                      </span>
+                    </h3>
+                    <p className="text-xs text-zinc-400 mt-0.5">
+                      Transmisión digital en streaming directo 24/7 sin cortes ni anuncios de la app. Compatible con audífonos y casco.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono px-3 py-1.5 rounded-xl bg-zinc-900 border border-zinc-800 text-zinc-300 flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
+                    30,000+ Emisoras Mundiales
+                  </span>
+                </div>
+              </div>
+
+              {/* Emisoras Principales por Defecto: Medellín & Colombia */}
+              <div>
+                <div className="flex items-center justify-between mb-3 px-1">
+                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Flame className="w-4 h-4 text-amber-400" />
+                    Sintonización Directa Medellín & Colombia
+                  </h4>
+                  <span className="text-[11px] text-zinc-400 font-mono">Stream AAC+ Alta Definición</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {DEFAULT_RADIO_STATIONS.map((station) => {
+                    const isStationPlaying = currentTrack.id === station.id && isPlaying;
+                    return (
+                      <div
+                        key={station.id}
+                        onClick={() => playRadioStation(station)}
+                        className={`group relative overflow-hidden rounded-2xl border p-4 cursor-pointer transition-all duration-300 ${
+                          isStationPlaying
+                            ? 'bg-gradient-to-br from-red-950/70 via-zinc-900 to-zinc-950 border-red-500/60 shadow-xl shadow-red-950/40 ring-1 ring-red-500/40'
+                            : 'bg-zinc-900/60 hover:bg-zinc-850 border-zinc-800 hover:border-zinc-700'
+                        }`}
+                      >
+                        <div className="flex items-start gap-3.5">
+                          <div className="relative shrink-0">
+                            <img
+                              src={station.coverUrl}
+                              alt={station.title}
+                              className="w-16 h-16 rounded-xl object-cover border border-zinc-700/60 shadow-md group-hover:scale-105 transition"
+                            />
+                            {isStationPlaying ? (
+                              <div className="absolute inset-0 bg-black/60 rounded-xl flex items-center justify-center">
+                                <Activity className="w-6 h-6 text-red-400 animate-bounce" />
+                              </div>
+                            ) : (
+                              <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 rounded-xl flex items-center justify-center transition">
+                                <Play className="w-6 h-6 text-white fill-current ml-0.5" />
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5 mb-1">
+                              <span className="text-[9px] px-1.5 py-0.5 rounded font-black tracking-wider bg-red-500/20 text-red-400 border border-red-500/30">
+                                🔴 LIVE
+                              </span>
+                              <span className="text-[10px] text-zinc-400 truncate">{station.album}</span>
+                            </div>
+                            <h5 className="text-sm font-bold text-white truncate group-hover:text-red-400 transition">
+                              {station.title}
+                            </h5>
+                            <p className="text-xs text-zinc-400 truncate mt-0.5">{station.genre}</p>
+                          </div>
+                        </div>
+
+                        <div className="mt-3 pt-3 border-t border-zinc-800/80 flex items-center justify-between">
+                          <span className="text-[11px] text-zinc-400 flex items-center gap-1.5">
+                            {isStationPlaying ? (
+                              <>
+                                <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                                <span className="text-red-400 font-semibold">Al Aire Ahora</span>
+                              </>
+                            ) : (
+                              'Toca para sintonizar'
+                            )}
+                          </span>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (isStationPlaying) {
+                                togglePlay();
+                              } else {
+                                playRadioStation(station);
+                              }
+                            }}
+                            className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-sm ${
+                              isStationPlaying
+                                ? 'bg-red-500 text-white shadow-red-500/30'
+                                : 'bg-zinc-800 group-hover:bg-red-500 text-zinc-200 group-hover:text-white'
+                            }`}
+                          >
+                            {isStationPlaying ? (
+                              <>
+                                <Pause className="w-3.5 h-3.5 fill-current" />
+                                <span>Pausar</span>
+                              </>
+                            ) : (
+                              <>
+                                <Play className="w-3.5 h-3.5 fill-current" />
+                                <span>Sintonizar</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Explorador Mundial Radio Browser & Búsqueda */}
+              <div className="bg-zinc-900/80 border border-zinc-800/80 rounded-2xl p-4 sm:p-5 space-y-4">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Globe className="w-4 h-4 text-emerald-400" />
+                    Explorador de Países & Buscador de Emisoras
+                  </h4>
+                  <span className="text-xs text-zinc-400">Radio Browser Network</span>
+                </div>
+
+                {/* Formulario de Búsqueda */}
+                <form onSubmit={handleSearchRadio} className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-zinc-400" />
+                    <input
+                      type="text"
+                      value={radioSearchQuery}
+                      onChange={(e) => setRadioSearchQuery(e.target.value)}
+                      placeholder="Buscar por nombre o frecuencia (ej: Olímpica, Mix, La Mega, Tropicana, BBC, Kiss, Ibiza)..."
+                      className="w-full bg-zinc-950 border border-zinc-800 focus:border-red-500 rounded-xl pl-10 pr-4 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none transition"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={isLoadingRadio}
+                    className="bg-red-500 hover:bg-red-400 text-white font-bold text-xs px-5 py-2.5 rounded-xl transition flex items-center gap-2 shrink-0 shadow-md shadow-red-500/20"
+                  >
+                    {isLoadingRadio ? (
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Search className="w-4 h-4" />
+                    )}
+                    Buscar
+                  </button>
+                  {radioSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRadioSearchQuery('');
+                        handleSelectRadioCountry(selectedRadioCountry);
+                      }}
+                      className="px-3 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs rounded-xl"
+                    >
+                      Limpiar
+                    </button>
+                  )}
+                </form>
+
+                {/* Filtro por Países */}
+                <div>
+                  <p className="text-[11px] font-semibold text-zinc-400 mb-2">Explorar emisoras por país:</p>
+                  <div className="flex items-center gap-2 overflow-x-auto pb-1.5 scrollbar-thin">
+                    {RADIO_COUNTRIES.map((country) => (
+                      <button
+                        key={country.code}
+                        onClick={() => handleSelectRadioCountry(country.code)}
+                        className={`text-xs px-3.5 py-1.5 rounded-xl font-medium whitespace-nowrap transition flex items-center gap-1.5 ${
+                          selectedRadioCountry === country.code
+                            ? 'bg-red-500 text-white font-bold shadow-md shadow-red-500/20 ring-1 ring-red-400'
+                            : 'bg-zinc-950 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-zinc-800'
+                        }`}
+                      >
+                        <span>{country.flag}</span>
+                        <span>{country.name.split(' ')[1] || country.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* Grid de Emisoras Encontradas / Exploradas */}
+              <div>
+                <div className="flex items-center justify-between mb-3 px-1">
+                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                    <Radio className="w-4 h-4 text-red-400" />
+                    {radioSearchQuery
+                      ? `Resultados para "${radioSearchQuery}"`
+                      : `Emisoras Principales (${selectedRadioCountry})`}
+                  </h4>
+                  <span className="text-xs text-zinc-400 font-mono">{radioStations.length} estaciones disponibles</span>
+                </div>
+
+                {isLoadingRadio ? (
+                  <div className="flex flex-col items-center justify-center py-16 gap-3 text-zinc-400 text-xs">
+                    <RefreshCw className="w-6 h-6 animate-spin text-red-400" />
+                    <span>Sintonizando servidores de Radio Browser API...</span>
+                  </div>
+                ) : radioStations.length > 0 ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {radioStations.map((station) => {
+                      const isCurrent = currentTrack.id === station.id && isPlaying;
+                      return (
+                        <div
+                          key={station.id}
+                          onClick={() => playRadioStation(station)}
+                          className={`group flex items-center justify-between p-3 rounded-2xl border transition cursor-pointer ${
+                            isCurrent
+                              ? 'bg-red-950/40 border-red-500/60 shadow-md ring-1 ring-red-500/30'
+                              : 'bg-zinc-900/50 hover:bg-zinc-800/60 border-zinc-800/80 hover:border-zinc-700'
+                          }`}
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div className="relative shrink-0">
+                              <img
+                                src={station.coverUrl}
+                                alt={station.title}
+                                className="w-12 h-12 rounded-xl object-cover border border-zinc-700/60"
+                                onError={(e) => {
+                                  (e.target as HTMLImageElement).src =
+                                    'https://images.unsplash.com/photo-1598488035139-bdbb2231ce04?w=600&auto=format&fit=crop&q=80';
+                                }}
+                              />
+                              {isCurrent && (
+                                <div className="absolute inset-0 bg-black/40 rounded-xl flex items-center justify-center">
+                                  <Activity className="w-5 h-5 text-red-400 animate-pulse" />
+                                </div>
+                              )}
+                            </div>
+
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5">
+                                <p className="text-xs font-bold text-white truncate group-hover:text-red-400 transition">
+                                  {station.title}
+                                </p>
+                              </div>
+                              <p className="text-[11px] text-zinc-400 truncate">{station.artist}</p>
+                              <p className="text-[10px] text-zinc-500 truncate">{station.genre}</p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleLike(station.id);
+                              }}
+                              className="p-2 rounded-xl text-zinc-400 hover:text-rose-400 transition"
+                              title="Favorito"
+                            >
+                              <Heart className={`w-4 h-4 ${station.liked ? 'text-rose-500 fill-rose-500' : ''}`} />
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (isCurrent) {
+                                  togglePlay();
+                                } else {
+                                  playRadioStation(station);
+                                }
+                              }}
+                              className={`p-2.5 rounded-xl transition ${
+                                isCurrent
+                                  ? 'bg-red-500 text-white shadow-md shadow-red-500/30'
+                                  : 'bg-zinc-800 group-hover:bg-red-500 text-zinc-300 group-hover:text-white'
+                              }`}
+                            >
+                              {isCurrent ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current" />}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="text-center py-12 text-zinc-500 text-xs">
+                    No se encontraron emisoras para esta búsqueda. Intenta con otro país o nombre.
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        ) : activeTab === 'rea-guide' ? (
             /* PUENTE REA SPOTIFY (morluto/rea) */
             <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-5 space-y-4">
               <div className="flex items-center justify-between">
@@ -2094,163 +2645,242 @@ export default function App() {
           )}
         </main>
 
-        {/* COLUMNA DERECHA (HERRAMIENTAS AUDÍFONOS/8D + LETRAS & NOTAS) */}
-        <aside className="lg:col-span-3 space-y-4">
-          {/* PANEL AUDIO 8D & INTERCOM / AUDÍFONOS */}
-          <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 space-y-3.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Bluetooth className={`w-4 h-4 ${accentClasses.text}`} />
-                <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-                  Control Audífonos & Casco
-                </h2>
+        {/* COLUMNA DERECHA: SEPARADA PARA RADIO Y MÚSICA */}
+        {activeTab === 'radio' ? (
+          /* PANEL LATERAL DERECHO DE RADIO EN VIVO */
+          <aside className="lg:col-span-3 space-y-4">
+            {/* Control Audífonos & Casco */}
+            <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 space-y-3.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Headphones className="w-4 h-4 text-red-400" />
+                  <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+                    Audio Audífonos / Casco
+                  </h2>
+                </div>
+                <span className="text-[10px] font-mono text-emerald-400">MediaSession OK</span>
               </div>
-              <span className="text-[10px] font-mono text-emerald-400">MediaSession Activo</span>
+              <p className="text-xs text-zinc-400">
+                Transmisión continua optimizada para audífonos Bluetooth e intercomunicador de moto sin interferencias.
+              </p>
+
+              {/* Audio 8D Espacial */}
+              <div className="flex items-center justify-between bg-zinc-900/90 border border-zinc-800 p-3 rounded-xl">
+                <div className="flex items-center gap-2.5">
+                  <Zap className={`w-5 h-5 ${is8DAudio ? 'text-red-400' : 'text-zinc-400'}`} />
+                  <div>
+                    <p className="text-xs font-bold text-zinc-200">Efecto Espacial 8D</p>
+                    <p className="text-[10px] text-zinc-400">
+                      Rotación {stereoPan > 0 ? `R +${stereoPan}` : `L ${stereoPan}`}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setIs8DAudio(!is8DAudio)}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition ${
+                    is8DAudio ? 'bg-red-500 text-white' : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  {is8DAudio ? 'ACTIVO' : 'OFF'}
+                </button>
+              </div>
             </div>
 
-            {/* Audio 8D Espacial */}
-            <div className="flex items-center justify-between bg-zinc-900/90 border border-zinc-800 p-3 rounded-xl">
-              <div className="flex items-center gap-2.5">
-                <Headphones className={`w-5 h-5 ${is8DAudio ? accentClasses.text : 'text-zinc-400'}`} />
+            {/* Ficha Técnica de la Emisora al Aire */}
+            <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 space-y-3 text-xs">
+              <div className="flex items-center justify-between pb-2 border-b border-zinc-800/80">
+                <div className="flex items-center gap-2">
+                  <Activity className="w-4 h-4 text-red-400" />
+                  <h3 className="font-bold text-zinc-200">Ficha Técnica Transmisión</h3>
+                </div>
+                <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
+              </div>
+              <div className="space-y-2 text-zinc-300">
                 <div>
-                  <p className="text-xs font-bold text-zinc-200">Audio Espacial 8D</p>
-                  <p className="text-[10px] text-zinc-400">
-                    Rotación 360° ({stereoPan > 0 ? `R +${stereoPan}` : `L ${stereoPan}`})
-                  </p>
+                  <span className="text-zinc-500 block text-[10px]">Emisora Actual:</span>
+                  <span className="font-bold text-white text-xs">{currentRadioStation.title}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Cadena:</span>
+                  <span className="text-zinc-300 truncate max-w-[170px]">{currentRadioStation.artist}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Formato:</span>
+                  <span className="font-mono text-emerald-400">MP3 Stream Directo (0 Lag)</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Dial:</span>
+                  <span className="font-mono text-amber-400">{currentRadioStation.album}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-zinc-500">Estado de Señal:</span>
+                  <span className="text-red-400 font-bold flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                    Transmisión Continua
+                  </span>
                 </div>
               </div>
-              <button
-                onClick={() => setIs8DAudio(!is8DAudio)}
-                className={`px-3 py-1 rounded-lg text-xs font-bold transition ${
-                  is8DAudio ? `${accentClasses.bg} text-black` : 'bg-zinc-800 text-zinc-400 hover:text-white'
-                }`}
-              >
-                {is8DAudio ? 'ACTIVO' : 'OFF'}
-              </button>
             </div>
-
-            {/* Loop de Sección A-B */}
-            <div className="bg-zinc-900/90 border border-zinc-800 p-3 rounded-xl space-y-2">
+          </aside>
+        ) : (
+          /* PANEL LATERAL DERECHO DE MÚSICA (Audio 8D, Loop A-B, Letras & Notas) */
+          <aside className="lg:col-span-3 space-y-4">
+            {/* PANEL AUDIO 8D & INTERCOM / AUDÍFONOS */}
+            <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 space-y-3.5">
               <div className="flex items-center justify-between">
-                <span className="text-xs font-bold text-zinc-200">Loop de Sección (A-B)</span>
-                {(loopA !== null || loopB !== null) && (
+                <div className="flex items-center gap-2">
+                  <Bluetooth className={`w-4 h-4 ${accentClasses.text}`} />
+                  <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+                    Control Audífonos & Casco
+                  </h2>
+                </div>
+                <span className="text-[10px] font-mono text-emerald-400">MediaSession Activo</span>
+              </div>
+
+              {/* Audio 8D Espacial */}
+              <div className="flex items-center justify-between bg-zinc-900/90 border border-zinc-800 p-3 rounded-xl">
+                <div className="flex items-center gap-2.5">
+                  <Headphones className={`w-5 h-5 ${is8DAudio ? accentClasses.text : 'text-zinc-400'}`} />
+                  <div>
+                    <p className="text-xs font-bold text-zinc-200">Audio Espacial 8D</p>
+                    <p className="text-[10px] text-zinc-400">
+                      Rotación 360° ({stereoPan > 0 ? `R +${stereoPan}` : `L ${stereoPan}`})
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setIs8DAudio(!is8DAudio)}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition ${
+                    is8DAudio ? `${accentClasses.bg} text-black` : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  {is8DAudio ? 'ACTIVO' : 'OFF'}
+                </button>
+              </div>
+
+              {/* Loop de Sección A-B */}
+              <div className="bg-zinc-900/90 border border-zinc-800 p-3 rounded-xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-zinc-200">Loop de Sección (A-B)</span>
+                  {(loopA !== null || loopB !== null) && (
+                    <button
+                      onClick={() => {
+                        setLoopA(null);
+                        setLoopB(null);
+                      }}
+                      className="text-[10px] text-rose-400 hover:underline"
+                    >
+                      Limpiar
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 gap-2 pt-1">
                   <button
-                    onClick={() => {
-                      setLoopA(null);
-                      setLoopB(null);
-                    }}
-                    className="text-[10px] text-rose-400 hover:underline"
-                  >
-                    Limpiar
-                  </button>
-                )}
-              </div>
-              <div className="grid grid-cols-2 gap-2 pt-1">
-                <button
-                  onClick={() => setLoopA(Math.floor(currentTime))}
-                  className={`py-1.5 px-2 rounded-lg text-xs font-mono border transition ${
-                    loopA !== null
-                      ? 'bg-emerald-950 border-emerald-500/50 text-emerald-300'
-                      : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
-                  }`}
-                >
-                  Punto A: {loopA !== null ? formatTime(loopA) : 'Marcar'}
-                </button>
-                <button
-                  onClick={() => {
-                    if (loopA !== null && currentTime > loopA) {
-                      setLoopB(Math.floor(currentTime));
-                    } else {
-                      showToast('Marca el Punto A y avanza la canción');
-                    }
-                  }}
-                  className={`py-1.5 px-2 rounded-lg text-xs font-mono border transition ${
-                    loopB !== null
-                      ? 'bg-emerald-950 border-emerald-500/50 text-emerald-300'
-                      : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
-                  }`}
-                >
-                  Punto B: {loopB !== null ? formatTime(loopB) : 'Marcar'}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* LETRAS SINCRONIZADAS */}
-          <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <Mic2 className={`w-4 h-4 ${accentClasses.text}`} />
-                <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-                  Letras & Notas
-                </h2>
-              </div>
-              <span className="text-[10px] text-zinc-500">Toca para saltar</span>
-            </div>
-
-            <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
-              {(currentTrack.lyrics || []).map((line, idx) => {
-                const nextLine = currentTrack.lyrics[idx + 1];
-                const isActiveLine =
-                  currentTime >= line.time && (!nextLine || currentTime < nextLine.time);
-
-                return (
-                  <div
-                    key={idx}
-                    onClick={() => {
-                      setCurrentTime(line.time);
-                      if (audioRef.current) audioRef.current.currentTime = line.time;
-                    }}
-                    className={`p-2 rounded-xl text-xs cursor-pointer transition flex items-start gap-2 ${
-                      isActiveLine
-                        ? `bg-zinc-800/90 ${accentClasses.text} font-bold border border-zinc-700`
-                        : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
+                    onClick={() => setLoopA(Math.floor(currentTime))}
+                    className={`py-1.5 px-2 rounded-lg text-xs font-mono border transition ${
+                      loopA !== null
+                        ? 'bg-emerald-950 border-emerald-500/50 text-emerald-300'
+                        : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
                     }`}
                   >
-                    <span className="font-mono text-[10px] opacity-60 mt-0.5">
-                      {formatTime(line.time)}
-                    </span>
-                    <span className="flex-1">{line.text}</span>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Notas con marca de tiempo */}
-            <div className="pt-2 border-t border-zinc-800/80 space-y-2">
-              <form onSubmit={addTimestampNote} className="flex gap-1.5">
-                <input
-                  type="text"
-                  value={newNoteText}
-                  onChange={(e) => setNewNoteText(e.target.value)}
-                  placeholder={`Guardar nota en ${formatTime(currentTime)}...`}
-                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-600"
-                />
-                <button
-                  type="submit"
-                  className={`${accentClasses.bg} text-black font-bold px-2.5 py-1.5 rounded-lg text-xs flex items-center gap-1`}
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                </button>
-              </form>
-
-              {(trackNotes[currentTrack.id] || []).map((n, i) => (
-                <div
-                  key={i}
-                  onClick={() => {
-                    setCurrentTime(n.time);
-                    if (audioRef.current) audioRef.current.currentTime = n.time;
-                  }}
-                  className="flex items-center gap-2 text-xs bg-zinc-900/90 border border-zinc-800/80 px-2.5 py-1.5 rounded-lg cursor-pointer hover:border-zinc-700"
-                >
-                  <Bookmark className={`w-3.5 h-3.5 shrink-0 ${accentClasses.text}`} />
-                  <span className="font-mono text-[10px] text-zinc-400">{formatTime(n.time)}</span>
-                  <span className="text-zinc-200 truncate">{n.note}</span>
+                    Punto A: {loopA !== null ? formatTime(loopA) : 'Marcar'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (loopA !== null && currentTime > loopA) {
+                        setLoopB(Math.floor(currentTime));
+                      } else {
+                        showToast('Marca el Punto A y avanza la canción');
+                      }
+                    }}
+                    className={`py-1.5 px-2 rounded-lg text-xs font-mono border transition ${
+                      loopB !== null
+                        ? 'bg-emerald-950 border-emerald-500/50 text-emerald-300'
+                        : 'bg-zinc-800 border-zinc-700 text-zinc-300 hover:bg-zinc-700'
+                    }`}
+                  >
+                    Punto B: {loopB !== null ? formatTime(loopB) : 'Marcar'}
+                  </button>
                 </div>
-              ))}
+              </div>
             </div>
-          </div>
-        </aside>
+
+            {/* LETRAS SINCRONIZADAS */}
+            <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Mic2 className={`w-4 h-4 ${accentClasses.text}`} />
+                  <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+                    Letras & Notas
+                  </h2>
+                </div>
+                <span className="text-[10px] text-zinc-500">Toca para saltar</span>
+              </div>
+
+              <div className="space-y-2 max-h-44 overflow-y-auto pr-1">
+                {(currentMusicTrack.lyrics || []).map((line, idx) => {
+                  const nextLine = currentMusicTrack.lyrics[idx + 1];
+                  const isActiveLine =
+                    currentTime >= line.time && (!nextLine || currentTime < nextLine.time);
+
+                  return (
+                    <div
+                      key={idx}
+                      onClick={() => {
+                        setCurrentTime(line.time);
+                        if (audioRef.current) audioRef.current.currentTime = line.time;
+                      }}
+                      className={`p-2 rounded-xl text-xs cursor-pointer transition flex items-start gap-2 ${
+                        isActiveLine
+                          ? `bg-zinc-800/90 ${accentClasses.text} font-bold border border-zinc-700`
+                          : 'text-zinc-400 hover:bg-zinc-900 hover:text-zinc-200'
+                      }`}
+                    >
+                      <span className="font-mono text-[10px] opacity-60 mt-0.5">
+                        {formatTime(line.time)}
+                      </span>
+                      <span className="flex-1">{line.text}</span>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Notas con marca de tiempo */}
+              <div className="pt-2 border-t border-zinc-800/80 space-y-2">
+                <form onSubmit={addTimestampNote} className="flex gap-1.5">
+                  <input
+                    type="text"
+                    value={newNoteText}
+                    onChange={(e) => setNewNoteText(e.target.value)}
+                    placeholder={`Guardar nota en ${formatTime(currentTime)}...`}
+                    className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-2.5 py-1.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-600"
+                  />
+                  <button
+                    type="submit"
+                    className={`${accentClasses.bg} text-black font-bold px-2.5 py-1.5 rounded-lg text-xs flex items-center gap-1`}
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                  </button>
+                </form>
+
+                {(trackNotes[currentMusicTrack.id] || []).map((n, i) => (
+                  <div
+                    key={i}
+                    onClick={() => {
+                      setCurrentTime(n.time);
+                      if (audioRef.current) audioRef.current.currentTime = n.time;
+                    }}
+                    className="flex items-center gap-2 text-xs bg-zinc-900/90 border border-zinc-800/80 px-2.5 py-1.5 rounded-lg cursor-pointer hover:border-zinc-700"
+                  >
+                    <Bookmark className={`w-3.5 h-3.5 shrink-0 ${accentClasses.text}`} />
+                    <span className="font-mono text-[10px] text-zinc-400">{formatTime(n.time)}</span>
+                    <span className="text-zinc-200 truncate">{n.note}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </aside>
+        )}
       </div>
 
       {/* REPRODUCTOR MINI FLOTANTE EN CELULAR (SOBRE LA BARRA DE NAVEGACIÓN INFERIOR) */}
@@ -2318,24 +2948,38 @@ export default function App() {
               </button>
             </div>
 
-            {/* Scrubber */}
+            {/* Scrubber o Indicador de Radio en Vivo */}
             <div className="space-y-1">
-              <input
-                type="range"
-                min="0"
-                max={duration || currentTrack.duration}
-                value={currentTime}
-                onChange={(e) => {
-                  const val = Number(e.target.value);
-                  setCurrentTime(val);
-                  if (audioRef.current) audioRef.current.currentTime = val;
-                }}
-                className="w-full h-1.5 bg-zinc-800 rounded-lg accent-emerald-500 cursor-pointer"
-              />
-              <div className="flex justify-between text-[11px] font-mono text-zinc-400">
-                <span>{formatTime(currentTime)}</span>
-                <span>{formatTime(duration || currentTrack.duration)}</span>
-              </div>
+              {currentTrack.sourceType === 'radio' ? (
+                <div className="flex items-center justify-between px-3.5 py-2 rounded-xl bg-red-950/50 border border-red-500/40 shadow-inner">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
+                    <span className="text-xs font-black text-red-400 font-mono tracking-wider">
+                      🔴 EN DIRECTO 24/7
+                    </span>
+                  </div>
+                  <span className="text-[10px] text-zinc-400 font-mono">SEÑAL DIGITAL SIN CORTES</span>
+                </div>
+              ) : (
+                <>
+                  <input
+                    type="range"
+                    min="0"
+                    max={duration || currentTrack.duration}
+                    value={currentTime}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      setCurrentTime(val);
+                      if (audioRef.current) audioRef.current.currentTime = val;
+                    }}
+                    className="w-full h-1.5 bg-zinc-800 rounded-lg accent-emerald-500 cursor-pointer"
+                  />
+                  <div className="flex justify-between text-[11px] font-mono text-zinc-400">
+                    <span>{formatTime(currentTime)}</span>
+                    <span>{formatTime(duration || currentTrack.duration)}</span>
+                  </div>
+                </>
+              )}
             </div>
 
             {/* Controles Principales */}
@@ -2383,7 +3027,8 @@ export default function App() {
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0B0D12]/98 backdrop-blur-xl border-t border-zinc-800/80 px-2 py-1.5 flex items-center justify-around">
         {[
           { id: 'home', label: 'Inicio', icon: ListMusic },
-          { id: 'jamendo', label: 'Jamendo', icon: Radio },
+          { id: 'radio', label: 'Radio FM', icon: Radio },
+          { id: 'jamendo', label: 'Jamendo', icon: Disc },
           { id: 'search', label: 'Buscar', icon: Globe },
           { id: 'vault', label: 'Bóveda', icon: ShieldCheck },
           { id: 'dsp-studio', label: 'DSP EQ', icon: Sliders }
@@ -2477,29 +3122,43 @@ export default function App() {
               </button>
             </div>
 
-            {/* Barra de progreso */}
-            <div className="w-full max-w-xl flex items-center gap-3">
-              <span className="text-[11px] font-mono text-zinc-400 w-9 text-right">
-                {formatTime(currentTime)}
-              </span>
-              <div className="relative flex-1 flex items-center">
-                <input
-                  type="range"
-                  min="0"
-                  max={duration || currentTrack.duration}
-                  value={currentTime}
-                  onChange={(e) => {
-                    const val = Number(e.target.value);
-                    setCurrentTime(val);
-                    if (audioRef.current) audioRef.current.currentTime = val;
-                  }}
-                  className="w-full h-1.5 bg-zinc-800 rounded-lg accent-emerald-500 cursor-pointer"
-                />
+            {/* Barra de progreso o Indicador Radio */}
+            {currentTrack.sourceType === 'radio' ? (
+              <div className="w-full max-w-xl flex items-center justify-between px-4 py-1.5 rounded-xl bg-red-950/40 border border-red-500/40">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />
+                  <span className="text-xs font-black text-red-400 font-mono tracking-wider shrink-0">🔴 SEÑAL EN VIVO</span>
+                  <span className="text-xs text-zinc-400 truncate">• {currentTrack.album}</span>
+                </div>
+                <div className="flex items-center gap-1.5 text-[11px] text-zinc-400 font-mono shrink-0">
+                  <Activity className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+                  <span>Bitrate Óptimo • DSP Activo</span>
+                </div>
               </div>
-              <span className="text-[11px] font-mono text-zinc-400 w-9">
-                {formatTime(duration || currentTrack.duration)}
-              </span>
-            </div>
+            ) : (
+              <div className="w-full max-w-xl flex items-center gap-3">
+                <span className="text-[11px] font-mono text-zinc-400 w-9 text-right">
+                  {formatTime(currentTime)}
+                </span>
+                <div className="relative flex-1 flex items-center">
+                  <input
+                    type="range"
+                    min="0"
+                    max={duration || currentTrack.duration}
+                    value={currentTime}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      setCurrentTime(val);
+                      if (audioRef.current) audioRef.current.currentTime = val;
+                    }}
+                    className="w-full h-1.5 bg-zinc-800 rounded-lg accent-emerald-500 cursor-pointer"
+                  />
+                </div>
+                <span className="text-[11px] font-mono text-zinc-400 w-9">
+                  {formatTime(duration || currentTrack.duration)}
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Volumen y velocidad */}

@@ -123,4 +123,5 @@ export const JAMENDO_GENRES = [
   { id: 'jazz', label: '🎷 Jazz' },
   { id: 'chillout', label: '☕ Chillout / Lo-Fi' },
   { id: 'metal', label: '🤘 Metal' },
-  { id: 'indie', label: '�
+  { id: 'indie', label: '🌿 Indie' }
+];

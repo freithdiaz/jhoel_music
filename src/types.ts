@@ -22,7 +22,7 @@ export interface Track {
   genre: string;
   coverUrl: string;
   audioUrl: string;
-  sourceType: 'curated' | 'audius' | 'invidious' | 'local-file' | 'fastapi' | 'rea-reverse' | 'jamendo';
+  sourceType: 'curated' | 'audius' | 'invidious' | 'local-file' | 'fastapi' | 'rea-reverse' | 'jamendo' | 'radio';
   cachedOffline: boolean;
   liked: boolean;
   lyrics: LyricLine[];
@@ -31,5 +31,5 @@ export interface Track {
 export type VisualizerMode = 'bars' | 'wave' | 'circle';
 export type ThemeAccent = 'emerald' | 'cyberpunk' | 'violet';
 export type AudioPreset = 'normal' | 'slowed' | 'nightcore' | 'lofi' | 'bassboost';
-export type ActiveTab = 'home' | 'search' | 'jamendo' | 'ai-radio' | 'vault' | 'dsp-studio' | 'server' | 'rea-guide';
+export type ActiveTab = 'home' | 'radio' | 'search' | 'jamendo' | 'ai-radio' | 'vault' | 'dsp-studio' | 'server' | 'rea-guide';
 

@@ -76,7 +76,7 @@ export async function searchFreeMusicOnline(query: string, fastApiBaseUrl?: stri
   if (fastApiBaseUrl) {
     try {
       const serverRes = await fetch(`${fastApiBaseUrl}/search_online?q=${encodeURIComponent(q)}`, {
-        signal: AbortSignal.timeout(4000)
+        signal: AbortSignal.timeout(10000)
       });
       if (serverRes.ok) {
         const items = await serverRes.json();
