@@ -4,6 +4,7 @@ import { mergeUserData } from './syncMerge';
 const CURRENT_USER_KEY = 'thomas_music_current_user';
 const LOCAL_ACCOUNTS_KEY = 'thomas_music_local_accounts';
 const SESSION_KEY = 'thomas_music_server_session';
+class ServerResponseError extends Error {}
 type SyncState = 'local' | 'pending' | 'syncing' | 'synced' | 'conflict' | 'auth';
 type SyncMeta = { server: string; revision: number | null; dirty: boolean; conflict: boolean };
 const activeSyncs = new Set<string>();
@@ -278,12 +279,12 @@ export async function loginUser(
         localStorage.setItem(dataKey(u), JSON.stringify(data));
         saveLocalAccountCredentials(u, p, user.displayName);
         return { user, data };
-      } else if (res.status === 401) {
+      } else {
         const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.detail || 'Usuario o contraseña incorrectos');
+        throw new ServerResponseError(errJson.detail || 'El servidor rechazó el inicio de sesión');
       }
     } catch (err: any) {
-      if (err.message && err.message.includes('incorrectos')) {
+      if (err instanceof ServerResponseError) {
         throw err;
       }
       // Servidor no disponible, pasar a validación local offline
@@ -356,12 +357,12 @@ export async function registerUser(
         saveLocalUserData(u, initialData, fastApiUrl);
         saveLocalAccountCredentials(u, p, name);
         return { user, data: initialData };
-      } else if (res.status === 409) {
+      } else {
         const errJson = await res.json().catch(() => ({}));
-        throw new Error(errJson.detail || 'Ese nombre de usuario ya está registrado');
+        throw new ServerResponseError(errJson.detail || 'El servidor rechazó el registro');
       }
     } catch (err: any) {
-      if (err.message && (err.message.includes('ya existe') || err.message.includes('ya está registrado'))) {
+      if (err instanceof ServerResponseError) {
         throw err;
       }
       // Servidor apagado, registrar localmente

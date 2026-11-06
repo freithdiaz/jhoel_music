@@ -63,6 +63,8 @@ Con la aplicación abierta y conectada, usa el botón de descarga de cada canci�
 ---
 
 ## 🖥️ Servidor Backend Local Opcional (FastAPI)
+Para preparar el despliegue en un servidor con el puerto local **8589**, Tailscale Serve y Funnel, consulta [DEPLOY_TAILSCALE.md](DEPLOY_TAILSCALE.md). No actives Funnel hasta revisar sus riesgos de exposición pública.
+
 Si tienes una colección de música en tu computadora o NAS, inicia el servidor Python:
 ```bash
 pip install -r requirements.txt
@@ -84,7 +86,7 @@ Reemplaza la dirección por la IP real. No expongas el servidor directamente a I
 
 La instalación PWA y las funciones offline en un teléfono normalmente requieren HTTPS: acceder por una IP local con HTTP no es equivalente a `localhost` en el propio teléfono.
 
-Para ejecutar las pruebas del backend: `python -m unittest discover -s tests`.
+Para ejecutar las pruebas del backend: `pip install -r requirements-dev.txt` y `python -m unittest discover -s tests`.
 
 ### Sincronización de la biblioteca
 

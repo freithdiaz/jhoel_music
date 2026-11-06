@@ -1,0 +1,14 @@
+services:
+  music:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8589:8589"
+    environment:
+      MUSIC_ALLOW_REGISTRATION: "false"
+      MUSIC_ENABLE_LOCAL_LIBRARY: "false"
+    volumes:
+      - music_data:/data
+
+volumes:
+  music_data:

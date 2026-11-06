@@ -330,7 +330,7 @@ def health_check():
 # 1. BÚSQUEDA RÁPIDA Y SUGERENCIAS EN VIVO (AUTOCLETO)
 # ==========================================
 @app.get("/suggestions")
-def get_suggestions(q: str = Query(..., description="Término para autocompletar sugerencias")):
+def get_suggestions(q: str = Query(..., max_length=200, description="Término para autocompletar sugerencias")):
     """
     Autocompletado de búsqueda en milisegundos (~30ms) usando el motor de sugerencias.
     Devuelve lista de sugerencias de canciones y artistas populares.
@@ -351,7 +351,7 @@ def get_suggestions(q: str = Query(..., description="Término para autocompletar
 
 @app.get("/search_online")
 def search_online(
-    q: str = Query(..., description="Nombre de la canción o artista"),
+    q: str = Query(..., max_length=200, description="Nombre de la canción o artista"),
     limit: int = Query(25, description="Número de resultados a extraer")
 ):
     """
@@ -414,7 +414,7 @@ def search_online(
             return results
     except Exception as e:
         print(f"Error en search_online: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=502, detail="No se pudo consultar el catálogo de audio")
 
 # ==========================================
 # 2. PROXY DE STREAMING EN VIVO (CANCIONES COMPLETAS)
@@ -429,7 +429,7 @@ def prepare_stream(v: str = Query(..., min_length=11, max_length=11, pattern=r"^
         raise HTTPException(status_code=502, detail="No se pudo preparar la pista")
 
 @app.get("/stream_yt")
-def stream_yt(request: Request, v: str = Query(..., description="ID del video de YouTube")):
+def stream_yt(request: Request, v: str = Query(..., min_length=11, max_length=11, description="ID del video de YouTube")):
     """
     Proxy de streaming en tiempo real:
     Lee los bytes directamente de los servidores CDN de YouTube y los envía al celular/PC
@@ -440,7 +440,7 @@ def stream_yt(request: Request, v: str = Query(..., description="ID del video de
         stream_url = get_stream_url(v)
     except Exception as err:
         print(f"Error extrayendo stream: {err}")
-        raise HTTPException(status_code=500, detail=f"No se pudo extraer el audio: {err}")
+        raise HTTPException(status_code=502, detail="No se pudo preparar el audio")
 
     # Manejar petición de Range
     range_header = request.headers.get("range")
@@ -502,7 +502,7 @@ def stream_yt(request: Request, v: str = Query(..., description="ID del video de
 # 3. RESOLVER ENLACES DE SPOTIFY A CANCIONES COMPLETAS
 # ==========================================
 @app.get("/resolve_spotify")
-def resolve_spotify(url: str = Query(..., description="URL de Spotify track")):
+def resolve_spotify(url: str = Query(..., max_length=2048, description="URL de Spotify track")):
     """
     Recibe un enlace de Spotify, extrae metadata de Spotify y resuelve
     hacia la pista oficial completa en streaming sin límite de tiempo.
@@ -538,7 +538,7 @@ def resolve_spotify(url: str = Query(..., description="URL de Spotify track")):
             }
     except Exception as e:
         print(f"Error en resolve_spotify: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=502, detail="No se pudo resolver el enlace")
 
 # ==========================================
 # 4. BIBLIOTECA LOCAL EN PC O NAS

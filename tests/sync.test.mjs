@@ -115,3 +115,10 @@ test('combinar preserva las versiones y sincroniza la copia combinada', async ()
   assert.equal(service.getSyncState('alice', 'http://test'), 'synced');
   assert.ok([...values.keys()].some(k => k.startsWith('thomas_music_sync_backup_alice_')));
 });
+
+test('el registro desactivado no crea silenciosamente una cuenta local', async () => {
+  values.clear();
+  globalThis.fetch = async () => new Response(JSON.stringify({ detail: 'El registro público está desactivado' }), { status: 403 });
+  await assert.rejects(() => service.registerUser('alice', 'password123', 'Alice', 'http://test'), /desactivado/);
+  assert.equal(localStorage.getItem('thomas_music_local_accounts'), null);
+});
