@@ -24,3 +24,10 @@ test('no intenta descargar una emisora en vivo', async () => {
   await assert.rejects(() => saveTrackOffline({ ...track, sourceType: 'radio' }), /emisoras/);
   assert.equal(fetched, false);
 });
+
+test('no descarga vistas previas de iTunes, incluidas las guardadas con el tipo anterior', async () => {
+  let fetched = false;
+  globalThis.fetch = async () => { fetched = true; return new Response(); };
+  await assert.rejects(() => saveTrackOffline({ ...track, id: 'itunes-1', sourceType: 'invidious' }), /vistas previas/);
+  assert.equal(fetched, false);
+});

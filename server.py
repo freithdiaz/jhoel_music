@@ -528,7 +528,7 @@ def resolve_spotify(url: str = Query(..., max_length=2048, description="URL de S
                 "id": f"spotify-{video_id}",
                 "title": title,
                 "artist": artist,
-                "album": "Spotify Re-Engineered via REA (Canción Completa)",
+                "album": "Posible coincidencia de YouTube",
                 "duration": int(entry.get('duration') or 210),
                 "bpm": 122,
                 "keySignature": "A Minor",

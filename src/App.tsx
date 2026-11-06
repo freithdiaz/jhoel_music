@@ -41,6 +41,7 @@ import {
 import { fetchTrendingFreeTracks, searchFreeMusicOnline, fetchSearchSuggestions } from './services/freeMusicApi';
 import { rankRelated, recommendationQuery, relatedReason, trackGenre } from './services/recommendations';
 import { playbackUrl } from './services/playbackUrl';
+import { playbackFailureMessage, trackSourceLabel } from './services/musicSources';
 import { createPlaybackQueue, stepPlaybackQueue, PlaybackQueue } from './services/playbackQueue';
 import { resolveSpotifyTrackViaRea } from './services/reaBridge';
 import {
@@ -316,6 +317,8 @@ export default function App() {
   const [currentTrackIndex, setCurrentTrackIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
+  const [unavailableTrackIds, setUnavailableTrackIds] = useState<Set<string>>(() => new Set());
+  const playbackTrackRef = useRef<Track | null>(null);
   const [playbackQueue, setPlaybackQueue] = useState<PlaybackQueue | null>(null);
   const playbackQueueRef = useRef<PlaybackQueue | null>(null);
   const updatePlaybackQueue = (queue: PlaybackQueue | null) => {
@@ -797,7 +800,7 @@ export default function App() {
     if (!colombia || hasRealHistory || !isOnline) { setRegionalTracks([]); setRegionalLoading(false); return; }
     let cancelled = false;
     setRegionalLoading(true);
-    searchFreeMusicOnline('reggaeton y musica tropical colombia', fastApiUrl).then(results => {
+    searchFreeMusicOnline('reggaeton', fastApiUrl).then(results => {
       if (!cancelled) setRegionalTracks(results);
     }).finally(() => { if (!cancelled) setRegionalLoading(false); });
     return () => { cancelled = true; };
@@ -1347,7 +1350,7 @@ export default function App() {
         }
       }
     });
-  }, [currentTrackIndex, tracks, duration, playbackSpeed, activeAudioSource, autoRadioEnabled, relatedTracks, personalTracks, onlineSearchResults, favorites50List, userTasteProfile, radioStations, currentRadioStation]);
+  }, [currentTrackIndex, tracks, duration, playbackSpeed, activeAudioSource, autoRadioEnabled, relatedTracks, personalTracks, onlineSearchResults, favorites50List, userTasteProfile, radioStations, currentRadioStation, unavailableTrackIds, offlineTracks]);
 
   const toggleWakeLock = async () => {
     if (isWakeLockActive) {
@@ -1579,6 +1582,7 @@ export default function App() {
       return;
     }
     if (!preserveQueue) updatePlaybackQueue(null);
+    playbackTrackRef.current = sourceTrack;
     if (rememberPrevious && activeAudioSource === 'music' && hasSelectedMusicRef.current && currentMusicTrack.id !== track.id) {
       recentTracksRef.current = [...recentTracksRef.current, currentMusicTrack].slice(-30);
     }
@@ -1620,6 +1624,7 @@ export default function App() {
         audioRef.current.pause();
         setIsPlaying(false);
         setIsBuffering(false);
+        setUnavailableTrackIds(previous => new Set(previous).add(track.id));
         showToast(track.audioUrl?.startsWith('blob:')
           ? 'El archivo local ya no está disponible. Vuelve a cargarlo o búscalo en la bóveda offline.'
           : 'La canción tardó demasiado en cargar. Revisa el servidor o prueba otra pista.');
@@ -1627,6 +1632,7 @@ export default function App() {
       audioRef.current.play().then(() => {
         if (nextRequestRef.current !== playbackRequest) return;
         if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+        setUnavailableTrackIds(previous => { const next = new Set(previous); next.delete(track.id); return next; });
         showToast(`Reproduciendo: ${track.title}`);
       }).catch((err) => {
         if (nextRequestRef.current !== playbackRequest || err?.name === 'AbortError') return;
@@ -1634,9 +1640,8 @@ export default function App() {
         console.warn('No se pudo reproducir la pista:', err);
         setIsPlaying(false);
         setIsBuffering(false);
-        showToast(track.audioUrl?.startsWith('blob:')
-          ? 'El archivo local ya no está disponible. Vuelve a cargarlo o búscalo en la bóveda offline.'
-          : 'No se pudo reproducir. Revisa la conexión con el servidor o prueba otra canción.');
+        setUnavailableTrackIds(previous => new Set(previous).add(track.id));
+        showToast(playbackFailureMessage(sourceTrack));
       });
     }
   };
@@ -1676,7 +1681,7 @@ export default function App() {
     progress.lastTime = now;
     progress.lastWall = wall;
     const isPreview = currentMusicTrack.duration > 60 && actualDuration < currentMusicTrack.duration * 0.5;
-    if (!progress.counted && !isPreview && activeAudioSource === 'music' && Number.isFinite(actualDuration) && actualDuration > 15 && progress.listened >= actualDuration * 0.5) {
+    if (!progress.counted && !isPreview && currentMusicTrack.sourceType !== 'itunes' && !currentMusicTrack.id.startsWith('itunes-') && activeAudioSource === 'music' && Number.isFinite(actualDuration) && actualDuration > 15 && progress.listened >= actualDuration * 0.5) {
       progress.counted = true;
       registerTrack50PercentListened(currentMusicTrack);
     }
@@ -1723,13 +1728,13 @@ export default function App() {
     }
 
     if (autoRadioEnabled) {
-      let candidates = rankRelated([...relatedTracks, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List], currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id));
+      let candidates = rankRelated([...relatedTracks, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List].filter(t => !unavailableTrackIds.has(t.id) || isDownloaded(t.id)), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id));
       const request = relatedRequestRef.current;
       if (!candidates.length && request?.trackId === currentMusicTrack.id) {
         showToast('Buscando canciones relacionadas…');
         const results = await request.promise;
         if (requestId !== nextRequestRef.current) return;
-        candidates = rankRelated([...results, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List], currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id));
+        candidates = rankRelated([...results, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List].filter(t => !unavailableTrackIds.has(t.id) || isDownloaded(t.id)), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id));
       }
       if (candidates[0]) {
         playSong(candidates[0]);
@@ -1864,9 +1869,6 @@ export default function App() {
       const results = await searchFreeMusicOnline(query, fastApiUrl);
       setOnlineSearchResults(results);
       if (results.length > 0) {
-        if (serverStatus !== 'connected' && results.some((r) => r.sourceType === 'invidious')) {
-          setServerStatus('connected');
-        }
         showToast(`Encontradas ${results.length} canciones para "${query}"`);
       } else {
         showToast('No se encontraron resultados online para esa búsqueda');
@@ -1889,12 +1891,11 @@ export default function App() {
     try {
       const resolved = await resolveSpotifyTrackViaRea(spotifyImportUrl.trim(), fastApiUrl);
       if (resolved) {
-        setTracks((prev) => [resolved, ...prev]);
-        selectTrack(0);
+        playSong(resolved);
         setSpotifyImportUrl('');
-        showToast(`¡Canción decodificada con REA Bridge!: ${resolved.title}`);
+        showToast(`Posible coincidencia encontrada: ${resolved.title} · ${trackSourceLabel(resolved)}`);
       } else {
-        showToast('Pega un enlace válido de Spotify (ej: https://open.spotify.com/track/...)');
+        showToast('No se encontró una coincidencia disponible para ese enlace de Spotify.');
       }
     } catch (err) {
       showToast('Error procesando el enlace con REA Bridge');
@@ -2088,7 +2089,7 @@ export default function App() {
 
   const nextInPlaylist = playbackQueue ? stepPlaybackQueue(playbackQueue, 1)?.tracks[playbackQueue.index + 1] : undefined;
   const nextSuggestion = activeAudioSource === 'music' && hasSelectedMusicRef.current
-    ? nextInPlaylist || (autoRadioEnabled ? rankRelated([...relatedTracks, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List], currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id))[0] : undefined)
+    ? nextInPlaylist || (autoRadioEnabled ? rankRelated([...relatedTracks, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List].filter(t => !unavailableTrackIds.has(t.id) || isDownloaded(t.id)), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id))[0] : undefined)
     : undefined;
 
   useEffect(() => {
@@ -2112,7 +2113,12 @@ export default function App() {
         ref={audioRef}
         crossOrigin="anonymous"
         onWaiting={() => setIsBuffering(true)}
-        onPlaying={() => { if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current); setIsBuffering(false); }}
+        onPlaying={() => {
+          if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+          setIsBuffering(false);
+          const id = playbackTrackRef.current?.id;
+          if (id) setUnavailableTrackIds(previous => { if (!previous.has(id)) return previous; const next = new Set(previous); next.delete(id); return next; });
+        }}
         onPause={() => setIsBuffering(false)}
         onTimeUpdate={handleTimeUpdate}
         onLoadedMetadata={(e) => {
@@ -2126,7 +2132,11 @@ export default function App() {
           console.warn('Music stream event:', err?.code, err?.message);
           if (activeAudioSource === 'music' && isPlaying && err?.code !== MediaError.MEDIA_ERR_ABORTED) {
             setIsPlaying(false);
-            showToast('No se pudo reproducir esta pista. Prueba otra fuente o revisa la conexión.');
+            const track = playbackTrackRef.current;
+            if (track) {
+              setUnavailableTrackIds(previous => new Set(previous).add(track.id));
+              showToast(playbackFailureMessage(track));
+            } else showToast('No se pudo reproducir esta pista. Prueba otra fuente o revisa la conexión.');
           }
         }}
         onEnded={() => {
@@ -3240,7 +3250,7 @@ export default function App() {
                     Buscar Música
                   </h3>
                   <p className="text-xs text-zinc-400 mt-0.5">
-                    Encuentra cualquier canción, álbum o artista para reproducir al instante.
+                    Buscamos primero en Jamendo y Audius; algunas alternativas son solo vistas previas.
                   </p>
                 </div>
               </div>
@@ -3366,9 +3376,10 @@ export default function App() {
                             <p className="text-xs text-zinc-400 truncate">
                               {track.artist} {track.genre ? `• ${track.genre}` : ''}
                             </p>
-                            <span className="text-[10px] text-zinc-500 font-mono">
-                              {formatTime(track.duration)}
-                            </span>
+                            <p className={`text-[10px] ${unavailableTrackIds.has(track.id) && !isDownloaded(track.id) ? 'text-amber-300' : 'text-zinc-500'}`}>
+                              {unavailableTrackIds.has(track.id) && !isDownloaded(track.id) ? 'No disponible · toca para reintentar' : trackSourceLabel(track)}
+                            </p>
+                            {track.sourceType !== 'itunes' && !track.id.startsWith('itunes-') && <span className="text-[10px] text-zinc-500 font-mono">{formatTime(track.duration)}</span>}
                           </div>
                         </div>
 
@@ -3559,6 +3570,9 @@ export default function App() {
                                 <div className="min-w-0 flex-1">
                                   <p className="text-xs font-bold text-white truncate">{track.title}</p>
                                   <p className="text-[11px] text-zinc-400 truncate">{track.artist}</p>
+                                  <p className={`text-[10px] ${unavailableTrackIds.has(track.id) && !isDownloaded(track.id) ? 'text-amber-300' : 'text-zinc-500'}`}>
+                                    {unavailableTrackIds.has(track.id) && !isDownloaded(track.id) ? 'No disponible · toca para reintentar' : trackSourceLabel(track)}
+                                  </p>
                                 </div>
                               </div>
                               <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
@@ -3726,6 +3740,9 @@ export default function App() {
                             </span>
                           </div>
                           <p className="text-[11px] text-zinc-400 truncate">{track.artist} • {track.genre}</p>
+                          <p className={`text-[10px] ${unavailableTrackIds.has(track.id) && !isDownloaded(track.id) ? 'text-amber-300' : 'text-zinc-500'}`}>
+                            {unavailableTrackIds.has(track.id) && !isDownloaded(track.id) ? 'No disponible · toca para reintentar' : trackSourceLabel(track)}
+                          </p>
                         </div>
                       </div>
 
@@ -4054,6 +4071,9 @@ export default function App() {
                               {track.bpm} BPM • {track.keySignature}
                             </span>
                           </div>
+                          <p className={`text-[10px] truncate ${unavailableTrackIds.has(track.id) && !isDownloaded(track.id) ? 'text-amber-300' : 'text-zinc-500'}`}>
+                            {unavailableTrackIds.has(track.id) && !isDownloaded(track.id) ? 'No disponible · toca para reintentar' : trackSourceLabel(track)}
+                          </p>
                         </div>
                       </div>
 

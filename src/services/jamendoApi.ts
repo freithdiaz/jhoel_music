@@ -65,8 +65,8 @@ function mapJamendoToTrack(item: JamendoTrackRaw): Track {
     liked: false,
     lyrics: [
       { time: 0, text: `♪ ${item.name} - ${item.artist_name} ♪` },
-      { time: 8, text: 'Música 100% legal bajo licencia Creative Commons (Jamendo)' },
-      { time: 20, text: 'Canción completa sin cortes ni límites de tiempo' },
+      { time: 8, text: 'Disponible a través de Jamendo; revisa la licencia de la pista' },
+      { time: 20, text: 'La disponibilidad depende del proveedor' },
       { time: 50, text: '♪ [Ajusta tus frecuencias en el ecualizador DSP] ♪' }
     ]
   };
@@ -86,7 +86,7 @@ export async function searchJamendoTracks(query: string, customClientId?: string
     if (!res.ok) throw new Error(`Jamendo API HTTP ${res.status}`);
     const data = await res.json();
     const items: JamendoTrackRaw[] = data.results || [];
-    return items.map(mapJamendoToTrack);
+    return items.filter(item => typeof item.audio === 'string' && item.audio.trim()).map(mapJamendoToTrack);
   } catch (err) {
     console.warn('Error buscando en Jamendo API:', err);
     return [];
@@ -107,7 +107,7 @@ export async function fetchTrendingJamendo(genre?: string, customClientId?: stri
     if (!res.ok) throw new Error(`Jamendo API HTTP ${res.status}`);
     const data = await res.json();
     const items: JamendoTrackRaw[] = data.results || [];
-    return items.map(mapJamendoToTrack);
+    return items.filter(item => typeof item.audio === 'string' && item.audio.trim()).map(mapJamendoToTrack);
   } catch (err) {
     console.warn('Error cargando canciones populares Jamendo:', err);
     return [];

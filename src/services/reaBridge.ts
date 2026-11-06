@@ -3,9 +3,8 @@ import { Track } from '../types';
 /**
  * Módulo REA (Reverse Engineer Anything - https://github.com/morluto/rea)
  * 
- * Permite resolver cualquier enlace de Spotify hacia audio en streaming libre en vivo:
- * 1. Si el servidor local FastAPI está activo, invoca yt-dlp para traer la canción COMPLETA de estudio.
- * 2. Si no hay servidor local, consulta Spotify oEmbed + catálogo universal en vivo.
+ * Usa metadatos para buscar una posible coincidencia en otra fuente.
+ * No accede directamente al audio de Spotify ni garantiza que haya una pista disponible.
  */
 
 export function parseSpotifyUrl(url: string): { type: 'track' | 'album' | 'playlist'; id: string } | null {
@@ -38,8 +37,8 @@ export async function resolveSpotifyTrackViaRea(spotifyUrl: string, fastApiUrl?:
           audioUrl: data.audioUrl.startsWith('http') ? data.audioUrl : `${fastApiUrl}${data.audioUrl}`,
           lyrics: [
             { time: 0, text: `♪ ${data.title} - ${data.artist} ♪` },
-            { time: 8, text: 'Decodificado desde Spotify con puente REA' },
-            { time: 20, text: 'Transmitiendo versión completa de estudio en directo' }
+            { time: 8, text: 'Posible coincidencia de YouTube; la disponibilidad depende del proveedor' },
+            { time: 20, text: 'No es audio extraído directamente de Spotify' }
           ]
         };
       }
@@ -59,24 +58,25 @@ export async function resolveSpotifyTrackViaRea(spotifyUrl: string, fastApiUrl?:
     const artist = data.author_name || 'Artista';
     const coverUrl = data.thumbnail_url || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=600&auto=format&fit=crop&q=80';
 
-    // Buscar el audio en el catálogo universal en vivo
-    let audioUrl = 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3';
+    // Sin una coincidencia con vista previa no se inventa una pista de reemplazo.
+    let match: any = null;
     try {
       const searchRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(`${artist} ${title}`)}&entity=song&limit=1`);
       if (searchRes.ok) {
         const searchData = await searchRes.json();
         if (searchData.results && searchData.results.length > 0 && searchData.results[0].previewUrl) {
-          audioUrl = searchData.results[0].previewUrl;
+          match = searchData.results[0];
         }
       }
     } catch {}
 
+    if (!match?.previewUrl) return null;
     return {
-      id: `rea-spotify-${parsed.id}`,
-      title,
-      artist,
-      album: 'Spotify Re-Engineered via REA',
-      duration: 215,
+      id: `itunes-${match.trackId || `spotify-${parsed.id}`}`,
+      title: match.trackName || title,
+      artist: match.artistName || artist,
+      album: match.collectionName || 'Vista previa aproximada',
+      duration: Math.round((match.trackTimeMillis || 180000) / 1000),
       bpm: 124,
       keySignature: 'F# Minor',
       energy: 88,
@@ -84,15 +84,14 @@ export async function resolveSpotifyTrackViaRea(spotifyUrl: string, fastApiUrl?:
       danceability: 82,
       genre: 'Spotify Import',
       coverUrl,
-      audioUrl,
-      sourceType: 'rea-reverse',
+      audioUrl: match.previewUrl,
+      sourceType: 'itunes',
       cachedOffline: false,
       liked: true,
       lyrics: [
         { time: 0, text: `♪ ${title} ♪` },
-        { time: 8, text: `Original de ${artist} - Importado mediante REA Bridge` },
-        { time: 20, text: 'Streaming decodificado libre de DRM en Thomas Music' },
-        { time: 50, text: '♪ [Disfruta el sonido con DSP 5-Bandas & Audio 8D] ♪' }
+        { time: 8, text: 'Coincidencia aproximada: vista previa de iTunes' },
+        { time: 20, text: 'No es audio extraído directamente de Spotify' }
       ]
     };
   } catch (err) {

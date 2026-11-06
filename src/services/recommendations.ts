@@ -1,4 +1,5 @@
 import { Track, UserData } from '../types';
+import { trackSourcePriority } from './musicSources';
 
 type Taste = UserData['userTasteProfile'];
 const normalize = (value: string) => (value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
@@ -81,5 +82,5 @@ export function rankRelated(candidates: Track[], current: Track, taste: Taste, r
     score += Math.min(10, (genreWeights.find(([name]) => name === candidateGenre || name === normalize(track.genre))?.[1] || 0) * 2);
     if (recentIds.includes(track.id)) score -= 100;
     return { track, score };
-  }).filter(item => item.score > 0).sort((a, b) => b.score - a.score).map(item => item.track);
+  }).filter(item => item.score > 0).sort((a, b) => trackSourcePriority(a.track) - trackSourcePriority(b.track) || b.score - a.score).map(item => item.track);
 }

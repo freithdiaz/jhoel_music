@@ -1,5 +1,5 @@
 import { Track } from '../types';
-import { searchJamendoTracks } from './jamendoApi';
+import { fetchTrendingJamendo, searchJamendoTracks } from './jamendoApi';
 
 const AUDIUS_APP_NAME = 'thomas_music_pwa';
 const AUDIUS_HOSTS = [
@@ -20,6 +20,8 @@ async function getWorkingAudiusHost(): Promise<string> {
 
 // 1. Obtener canciones en tendencia gratis desde Audius
 export async function fetchTrendingFreeTracks(): Promise<Track[]> {
+  const jamendo = await fetchTrendingJamendo();
+  if (jamendo.length) return jamendo;
   try {
     const host = await getWorkingAudiusHost();
     const res = await fetch(`${host}/v1/tracks/trending?app_name=${AUDIUS_APP_NAME}&limit=16`, {
@@ -119,53 +121,13 @@ export async function fetchSearchSuggestions(query: string, fastApiBaseUrl?: str
   return [];
 }
 
-// 3. Búsqueda Universal en Vivo de cualquier música en internet
-// Intenta primero el Servidor FastAPI yt-dlp local (si está activo, da la canción COMPLETA de YouTube Music)
-// Si no está activo el servidor, usa el catálogo global iTunes (cualquier artista del mundo con preview de estudio oficial) y Audius
-export async function searchFreeMusicOnline(query: string, fastApiBaseUrl?: string): Promise<Track[]> {
+// Jamendo y Audius primero; si no hay coincidencias, se ofrecen vistas previas de iTunes.
+// No se consulta YouTube automáticamente: puede bloquear la extracción en servidores.
+export async function searchFreeMusicOnline(query: string, _fastApiBaseUrl?: string): Promise<Track[]> {
   if (!query || query.trim().length < 2) return [];
   const q = query.trim();
 
-  // Opción A: Probar Servidor FastAPI / yt-dlp local si está configurado
-  if (fastApiBaseUrl) {
-    try {
-      const serverRes = await fetch(`${fastApiBaseUrl}/search_online?q=${encodeURIComponent(q)}&limit=25`, {
-        signal: AbortSignal.timeout(12000)
-      });
-      if (serverRes.ok) {
-        const items = await serverRes.json();
-        if (Array.isArray(items) && items.length > 0) {
-          return items.map((it: any) => ({
-            id: it.id || `yt-${Math.random()}`,
-            title: it.title || 'Canción',
-            artist: it.artist || 'Artista',
-            album: it.album || 'Álbum Oficial',
-            duration: it.duration || 180,
-            bpm: it.bpm || 120,
-            keySignature: it.keySignature || 'C Major',
-            energy: it.energy ?? 80,
-            acousticness: it.acousticness ?? 25,
-            danceability: it.danceability ?? 80,
-            genre: it.genre || 'Música Online',
-            coverUrl: it.coverUrl || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80',
-            audioUrl: it.audioUrl.startsWith('http') ? it.audioUrl : `${fastApiBaseUrl}${it.audioUrl}`,
-            sourceType: it.sourceType || 'invidious',
-            cachedOffline: false,
-            liked: false,
-            lyrics: it.lyrics || [
-              { time: 0, text: `♪ Reproduciendo en vivo: ${it.title} ♪` },
-              { time: 10, text: `Transmitido directamente desde internet por el motor yt-dlp` },
-              { time: 30, text: `Sin descargas previas • Calidad Directa de Estudio` }
-            ]
-          }));
-        }
-      }
-    } catch {
-      // Servidor local no respondió, pasar a catálogo universal directo
-    }
-  }
-
-  // Opción B: Búsqueda en Jamendo Oficial (Canciones COMPLETAS sin límite de 30s)
+  // Jamendo: catálogo de artistas que publican en ese servicio.
   try {
     const jamendoResults = await searchJamendoTracks(q);
     if (jamendoResults && jamendoResults.length > 0) {
@@ -175,15 +137,39 @@ export async function searchFreeMusicOnline(query: string, fastApiBaseUrl?: stri
     console.debug('Fallo consulta Jamendo:', err);
   }
 
-  // Opción C: Búsqueda Global en Catálogo Universal Oficial (iTunes Open API)
-  // Contiene LITERALMENTE cualquier artista comercial (Coldplay, Bad Bunny, Shakira, Queen, Eminem, etc.)
+  // Audius: resultados alternativos si Jamendo no tiene coincidencias.
+  try {
+    const host = await getWorkingAudiusHost();
+    const res = await fetch(
+      `${host}/v1/tracks/search?query=${encodeURIComponent(q)}&app_name=${AUDIUS_APP_NAME}&limit=10`,
+      { signal: AbortSignal.timeout(4000) }
+    );
+    if (res.ok) {
+      const json = await res.json();
+      const items = Array.isArray(json.data) ? json.data.filter((item: any) => item?.id) : [];
+      if (items.length) return items.map((item: any): Track => ({
+        id: `audius-${item.id}`,
+        title: item.title || 'Pista Audius', artist: item.user?.name || 'Artista independiente',
+        album: item.genre || 'Audius', duration: item.duration || 0,
+        bpm: 120, keySignature: 'Desconocida', energy: 50, acousticness: 50, danceability: 50,
+        genre: item.genre || 'Desconocido',
+        coverUrl: item.artwork?.['480x480'] || 'https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=600&auto=format&fit=crop&q=80',
+        audioUrl: `${host}/v1/tracks/${item.id}/stream?app_name=${AUDIUS_APP_NAME}`,
+        sourceType: 'audius', cachedOffline: false, liked: false, lyrics: []
+      }));
+    }
+  } catch (err) {
+    console.debug('Fallo Audius search:', err);
+  }
+
+  // iTunes solo proporciona una vista previa cuando está disponible.
   try {
     const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=25`;
     const res = await fetch(itunesUrl, { signal: AbortSignal.timeout(4000) });
     if (res.ok) {
       const data = await res.json();
       if (data.results && data.results.length > 0) {
-        return data.results.map((item: any): Track => {
+        return data.results.filter((item: any) => typeof item.previewUrl === 'string' && item.previewUrl).map((item: any): Track => {
           // Reemplazar carátula de 100x100 por 600x600 HD
           const hdCover = item.artworkUrl100
             ? item.artworkUrl100.replace('100x100bb', '600x600bb')
@@ -193,7 +179,7 @@ export async function searchFreeMusicOnline(query: string, fastApiBaseUrl?: stri
             id: `itunes-${item.trackId}`,
             title: item.trackName || 'Canción Online',
             artist: item.artistName || 'Artista Universal',
-            album: item.collectionName || 'Lanzamiento Oficial',
+            album: item.collectionName || 'Vista previa',
             duration: Math.round((item.trackTimeMillis || 180000) / 1000),
             bpm: 120,
             keySignature: 'C Major',
@@ -203,13 +189,13 @@ export async function searchFreeMusicOnline(query: string, fastApiBaseUrl?: stri
             genre: item.primaryGenreName || 'Pop',
             coverUrl: hdCover,
             audioUrl: item.previewUrl,
-            sourceType: 'invidious',
+            sourceType: 'itunes',
             cachedOffline: false,
             liked: false,
             lyrics: [
               { time: 0, text: `♪ ${item.trackName} - ${item.artistName} ♪` },
               { time: 8, text: `Álbum: ${item.collectionName || 'Single'}` },
-              { time: 15, text: `Streaming directo de alta fidelidad desde internet` }
+              { time: 15, text: 'Vista previa; no es la canción completa' }
             ]
           };
         });
@@ -217,45 +203,6 @@ export async function searchFreeMusicOnline(query: string, fastApiBaseUrl?: stri
     }
   } catch (err) {
     console.debug('Fallo consulta catálogo iTunes:', err);
-  }
-
-  // Opción C: Red Descentralizada Audius
-  try {
-    const host = await getWorkingAudiusHost();
-    const res = await fetch(
-      `${host}/v1/tracks/search?query=${encodeURIComponent(q)}&app_name=${AUDIUS_APP_NAME}&limit=10`,
-      { signal: AbortSignal.timeout(4000) }
-    );
-    if (res.ok) {
-      const json = await res.json();
-      const items = json.data || [];
-      return items.map((item: any, idx: number): Track => ({
-        id: `audius-${item.id || idx}`,
-        title: item.title,
-        artist: item.user?.name || 'Artista Libre',
-        album: item.genre || 'Audius Free Stream',
-        duration: item.duration || 190,
-        bpm: 120,
-        keySignature: 'A Minor',
-        energy: 80,
-        acousticness: 20,
-        danceability: 75,
-        genre: item.genre || 'Web Stream',
-        coverUrl: item.artwork
-          ? item.artwork['480x480'] || Object.values(item.artwork)[0]
-          : 'https://images.unsplash.com/photo-1470225620780-dba8ba36b745?w=600&auto=format&fit=crop&q=80',
-        audioUrl: `${host}/v1/tracks/${item.id}/stream?app_name=${AUDIUS_APP_NAME}`,
-        sourceType: 'audius',
-        cachedOffline: false,
-        liked: false,
-        lyrics: [
-          { time: 0, text: `♪ ${item.title} ♪` },
-          { time: 10, text: `Por ${item.user?.name || 'Artista Independiente'}` }
-        ]
-      }));
-    }
-  } catch (err) {
-    console.warn('Fallo Audius search fallback:', err);
   }
 
   return [];

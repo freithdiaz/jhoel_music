@@ -26,3 +26,10 @@ test('merengue y pop siguen su propio contexto', () => {
   const maroon = track('maroon', 'Maroon 5', 'Pop');
   assert.deepEqual(rankRelated([feid, maroon], ed, taste, []).map(t => t.id), ['maroon']);
 });
+
+test('prefiere Jamendo a YouTube entre pistas relacionadas', () => {
+  const current = track('actual', 'Ed Sheeran', 'Pop');
+  const youtube = { ...track('yt-123', 'Ed Sheeran', 'Pop'), sourceType: 'invidious', audioUrl: '/api/stream_yt?v=123' };
+  const jamendo = { ...track('jamendo-1', 'Otro artista', 'Pop'), sourceType: 'jamendo' };
+  assert.deepEqual(rankRelated([youtube, jamendo], current, taste, []).map(t => t.id), ['jamendo-1', 'yt-123']);
+});

@@ -7,7 +7,7 @@ Un clon de Spotify 100% libre, gratuito y autoalojable, diseñado para funcionar
 ## 🚀 Características Principales
 
 1. **Música 100% Gratis y Libre:**
-   - **Buscador en Streaming Libre (Audius API):** Explora y reproduce millones de canciones sin anuncios, sin pagos y sin registrarte.
+   - **Buscador de música:** consulta primero Jamendo y después Audius. Si no hay coincidencias, puede ofrecer vistas previas de iTunes, identificadas como tales.
    - **Importación de enlaces de Spotify:** consulta metadatos y busca una posible coincidencia en otro catálogo; no reproduce directamente el audio de Spotify. La coincidencia puede ser distinta o una vista previa.
    - **Bóveda Offline Persistente (IndexedDB):** Descarga pistas a la memoria de tu celular para escucharlas sin conexión ni gastar datos móviles.
    - **Exportación Directa MP3:** Descarga cualquier canción libre de DRM.
@@ -98,6 +98,8 @@ Las cuentas creadas sin servidor son locales a ese navegador y no se crean autom
 
 En Inicio puedes elegir Colombia, Global o usar la región del idioma del dispositivo; Colombia es la opción predeterminada y no se consulta tu ubicación GPS. Sin historial, Colombia inicia una búsqueda orientativa de música urbana y tropical. Con el uso, la pantalla incorpora sugerencias relacionadas con tus escuchas.
 
-Auto-DJ prioriza el artista y género de la canción actual, utiliza el perfil de escuchas como señal adicional y evita canciones recientes. Busca posibles pistas sin interrumpir la reproducción actual. Si no encuentra una coincidencia, avisa en vez de cambiar a un género sin relación; puedes desactivar Auto-DJ para seguir el orden de la lista. La relación es una aproximación basada en metadatos y una pequeña selección editorial, no un catálogo completo de artistas similares. La disponibilidad y duración dependen del proveedor; algunas fuentes solo ofrecen vistas previas. Las búsquedas de recomendaciones envían un nombre de artista o género al proveedor configurado.
+Auto-DJ prioriza el artista y género de la canción actual, utiliza el perfil de escuchas como señal adicional y evita canciones recientes. Entre pistas relacionadas, favorece archivos locales, Jamendo y Audius antes que vistas previas o enlaces de YouTube. Busca posibles pistas sin interrumpir la reproducción actual. Si no encuentra una coincidencia, avisa en vez de cambiar a un género sin relación; puedes desactivar Auto-DJ para seguir el orden de la lista. La relación es una aproximación basada en metadatos y una pequeña selección editorial, no un catálogo completo de artistas similares. La disponibilidad y duración dependen del proveedor; algunas fuentes solo ofrecen vistas previas. Las búsquedas de recomendaciones envían un nombre de artista o género al proveedor consultado.
+
+La búsqueda normal no usa YouTube automáticamente, ya que el proveedor puede bloquear la extracción desde el servidor. Las playlists antiguas conservan sus enlaces y se pueden intentar reproducir; si una pista falla, se marca como no disponible durante la sesión y se permite reintentar. La disponibilidad no puede garantizarse antes de reproducir. Jamendo y Audius tienen catálogos diferentes de YouTube: algunos artistas o canciones comerciales pueden no estar disponibles completos. Las vistas previas de iTunes no cuentan como canciones completas escuchadas y sus condiciones de uso pueden limitar la descarga.
 
 El perfil aprende tras escuchar aproximadamente la mitad del audio, sin contar saltos en la barra de reproducción. Las vistas previas detectadas no se cuentan como una canción completa. Ejecuta `node --test tests/recommendations.test.mjs` para comprobar los casos básicos de recomendaciones.
