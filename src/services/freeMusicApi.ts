@@ -68,7 +68,8 @@ export async function fetchTrendingFreeTracks(): Promise<Track[]> {
 }
 
 // 2. Autocompletado de Sugerencias en Tiempo Real (FastAPI + iTunes Suggest)
-export async function fetchSearchSuggestions(query: string, fastApiBaseUrl?: string): Promise<string[]> {
+export async function fetchSearchSuggestions(query: string, fastApiBaseUrl?: string, provider: 'free' | 'youtube' | 'stream' = 'free'): Promise<string[]> {
+  if (provider !== 'free') return [];
   const q = query.trim();
   if (!q || q.length < 1) return [];
 

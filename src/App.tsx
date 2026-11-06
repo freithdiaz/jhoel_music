@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { searchYouTubeStream } from './services/youtubeSearch';
 import {
   Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, Repeat, Shuffle,
   Heart, Download, CheckCircle2, Sliders, Radio, Disc, Music, Upload,
@@ -333,6 +334,8 @@ export default function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [onlineSearchResults, setOnlineSearchResults] = useState<Track[]>([]);
   const [isSearchingOnline, setIsSearchingOnline] = useState(false);
+  const [searchProvider, setSearchProvider] = useState<'free' | 'stream'>('stream');
+  const searchProviderRef = useRef<'free' | 'stream'>('stream');
   const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [visualizerMode, setVisualizerMode] = useState<VisualizerMode>('bars');
   const [themeAccent, setThemeAccent] = useState<ThemeAccent>(() => {
@@ -937,7 +940,8 @@ export default function App() {
     if (val.trim().length >= 2) {
       searchDebounceRef.current = setTimeout(async () => {
         try {
-          const suggestions = await fetchSearchSuggestions(val, fastApiUrl);
+          const suggestions = await fetchSearchSuggestions(val, fastApiUrl, searchProviderRef.current);
+          if (searchProviderRef.current !== searchProvider) return;
           const localMatches = tracks
             .filter((t) =>
               (t.title || '').toLowerCase().includes(val.toLowerCase()) ||
@@ -1300,6 +1304,7 @@ export default function App() {
   useEffect(() => {
     registerMediaSessionHandlers({
       onPlay: () => {
+        if (activeAudioSource === 'music' && currentMusicTrack.sourceType === 'youtube') { showToast('Usa los controles del reproductor de YouTube.'); return; }
         if (activeAudioSource === 'radio') {
           if (radioAudioRef.current) {
             radioAudioRef.current.play().then(() => setIsPlaying(true)).catch(console.warn);
@@ -1318,6 +1323,7 @@ export default function App() {
         }
       },
       onPause: () => {
+        if (activeAudioSource === 'music' && currentMusicTrack.sourceType === 'youtube') { showToast('Usa los controles del reproductor de YouTube.'); return; }
         nextRequestRef.current++;
         if (activeAudioSource === 'radio') {
           if (radioAudioRef.current) {
@@ -1334,14 +1340,14 @@ export default function App() {
       onNext: () => handleNextTrack(),
       onPrev: () => handlePrevTrack(),
       onSeek: (targetTime) => {
-        if (activeAudioSource === 'music' && audioRef.current) {
+        if (activeAudioSource === 'music' && currentMusicTrack.sourceType !== 'youtube' && audioRef.current) {
           audioRef.current.currentTime = targetTime;
           setCurrentTime(targetTime);
           updateMediaSessionPosition(targetTime, duration, playbackSpeed);
         }
       },
       onSeekRelative: (offset) => {
-        if (activeAudioSource === 'music' && audioRef.current) {
+        if (activeAudioSource === 'music' && currentMusicTrack.sourceType !== 'youtube' && audioRef.current) {
           const newTime = Math.max(0, Math.min(duration, audioRef.current.currentTime + offset));
           audioRef.current.currentTime = newTime;
           setCurrentTime(newTime);
@@ -1350,7 +1356,7 @@ export default function App() {
         }
       }
     });
-  }, [currentTrackIndex, tracks, duration, playbackSpeed, activeAudioSource, autoRadioEnabled, relatedTracks, personalTracks, onlineSearchResults, favorites50List, userTasteProfile, radioStations, currentRadioStation, unavailableTrackIds, offlineTracks]);
+  }, [currentTrackIndex, tracks, duration, playbackSpeed, activeAudioSource, currentMusicTrack.sourceType, autoRadioEnabled, relatedTracks, personalTracks, onlineSearchResults, favorites50List, userTasteProfile, radioStations, currentRadioStation, unavailableTrackIds, offlineTracks]);
 
   const toggleWakeLock = async () => {
     if (isWakeLockActive) {
@@ -1523,6 +1529,7 @@ export default function App() {
     }
 
     if (!hasSelectedMusicRef.current) { showToast('Elige una canción para comenzar'); return; }
+    if (currentMusicTrack.sourceType === 'youtube') { showToast('Usa los controles del reproductor de YouTube.'); return; }
     initWebAudio();
     if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
       audioCtxRef.current.resume();
@@ -1565,7 +1572,7 @@ export default function App() {
       showToast('Espera un momento mientras se abre la bóveda offline.');
       return;
     }
-    const offlineCopy = offlineTracksRef.current.find(item => item.id === track.id);
+    const offlineCopy = track.sourceType === 'youtube' ? undefined : offlineTracksRef.current.find(item => item.id === track.id);
     if (!navigator.onLine && !offlineCopy) {
       audioRef.current?.pause();
       setIsPlaying(false);
@@ -1573,7 +1580,9 @@ export default function App() {
       showToast('Esta canción no está descargada en este dispositivo.');
       return;
     }
-    const sourceTrack = offlineCopy || track;
+    const sourceTrack: Track = track.sourceType === 'youtube' && /^yt-[A-Za-z0-9_-]{11}$/.test(track.id)
+      ? { ...track, sourceType: 'invidious', audioUrl: `/stream_yt?v=${track.id.slice(3)}` }
+      : offlineCopy || track;
     const resolvedUrl = playbackUrl(sourceTrack, fastApiUrl, window.location.href);
     if (!resolvedUrl) {
       setIsPlaying(false);
@@ -1606,10 +1615,10 @@ export default function App() {
       const idx = prev.findIndex((t) => t.id === track.id);
       if (idx !== -1) {
         setCurrentTrackIndex(idx);
-        return prev;
+        return prev.map((item, index) => index === idx ? sourceTrack : item);
       }
       setCurrentTrackIndex(0);
-      return [track, ...prev];
+      return [sourceTrack, ...prev];
     });
 
     if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
@@ -1866,15 +1875,21 @@ export default function App() {
     setSearchCurrentPage(1);
     setIsSuggestionsOpen(false);
     try {
-      const results = await searchFreeMusicOnline(query, fastApiUrl);
+      let results: Track[];
+      if (searchProvider === 'stream') {
+        results = await searchYouTubeStream(fastApiUrl, query, AbortSignal.timeout(20000));
+      } else {
+        results = await searchFreeMusicOnline(query, fastApiUrl);
+      }
       setOnlineSearchResults(results);
       if (results.length > 0) {
         showToast(`Encontradas ${results.length} canciones para "${query}"`);
       } else {
         showToast('No se encontraron resultados online para esa búsqueda');
       }
-    } catch {
-      showToast('Error al conectar con la red de streaming libre');
+    } catch (error: any) {
+      setOnlineSearchResults([]);
+      showToast(error?.message || 'Error al conectar con el servidor de búsqueda');
     } finally {
       setIsSearchingOnline(false);
     }
@@ -3250,7 +3265,7 @@ export default function App() {
                     Buscar Música
                   </h3>
                   <p className="text-xs text-zinc-400 mt-0.5">
-                    Buscamos primero en Jamendo y Audius; algunas alternativas son solo vistas previas.
+                    La búsqueda de YouTube está disponible, pero su reproducción está deshabilitada por seguridad. Las fuentes libres incluyen algunas vistas previas.
                   </p>
                 </div>
               </div>
@@ -3258,6 +3273,17 @@ export default function App() {
               {/* BARRA DE BÚSQUEDA CON AUTOCOMPLETADO */}
               <div className="relative">
                 <div className="flex gap-2">
+                  <select aria-label="Fuente de búsqueda" value={searchProvider} onChange={e => {
+                    const provider = e.target.value as 'free' | 'stream';
+                    searchProviderRef.current = provider;
+                    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
+                    setSearchSuggestions([]);
+                    setIsSuggestionsOpen(false);
+                    setSearchProvider(provider);
+                  }} className="bg-zinc-900 text-sm rounded-xl px-2">
+                    <option value="stream">YouTube · streaming</option>
+                    <option value="free">Fuentes libres</option>
+                  </select>
                   <div className="relative flex-1">
                     <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                     <input
@@ -4438,15 +4464,15 @@ export default function App() {
           <button onClick={handleNextTrack} aria-label="Siguiente canción o emisora" className="p-2 text-zinc-300 hover:text-white">
             <SkipForward className="w-4 h-4 fill-current" />
           </button>
-          <button
+          {currentTrack.sourceType === 'youtube' ? <span className="text-xs text-zinc-300">Controles en YouTube</span> : <button
             onClick={togglePlay}
             aria-label={isPlaying ? 'Pausar' : 'Reproducir'}
             className={`w-9 h-9 rounded-full ${accentClasses.bg} text-black flex items-center justify-center`}
           >
             {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
-          </button>
+          </button>}
         </div>
-        {currentTrack.sourceType !== 'radio' && <div className="mobile-deck__progress" aria-hidden="true"><span style={{ width: `${Math.min(100, Math.max(0, duration > 0 ? currentTime / duration * 100 : 0))}%` }} /></div>}
+        {currentTrack.sourceType !== 'radio' && currentTrack.sourceType !== 'youtube' && <div className="mobile-deck__progress" aria-hidden="true"><span style={{ width: `${Math.min(100, Math.max(0, duration > 0 ? currentTime / duration * 100 : 0))}%` }} /></div>}
       </div>}
 
       {/* PANTALLA COMPLETA NOW PLAYING EXPANDIDA EN CELULAR (ESTILO SPOTIFY MOBILE) */}
@@ -4458,7 +4484,7 @@ export default function App() {
               <ChevronDown className="w-6 h-6" />
             </button>
             <div className="text-center">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Tu sesión · {isPlaying ? 'Reproduciendo' : 'En pausa'}</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Tu sesión · {currentTrack.sourceType === 'youtube' ? 'Controles en YouTube' : isPlaying ? 'Reproduciendo' : 'En pausa'}</p>
               <p className="text-xs font-semibold text-zinc-200">{currentTrack.album}</p>
             </div>
             <button onClick={() => toggleOfflineVault(currentTrack.id, undefined, currentTrack)} className="p-2 text-emerald-400">
@@ -4487,7 +4513,7 @@ export default function App() {
 
             {/* Scrubber o Indicador de Radio en Vivo */}
             <div className="space-y-1">
-              {currentTrack.sourceType === 'radio' ? (
+              {currentTrack.sourceType === 'youtube' ? <p className="text-xs text-zinc-400">Usa el progreso y volumen del reproductor de YouTube.</p> : currentTrack.sourceType === 'radio' ? (
                 <div className="flex items-center justify-between px-3.5 py-2 rounded-xl bg-red-950/50 border border-red-500/40 shadow-inner">
                   <div className="flex items-center gap-2">
                     <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-ping" />
@@ -4533,13 +4559,13 @@ export default function App() {
                 <SkipBack className="w-7 h-7 fill-current" />
               </button>
 
-              <button
+              {currentTrack.sourceType === 'youtube' ? <span className="text-xs text-zinc-300">YouTube</span> : <button
                 onClick={togglePlay}
                 aria-label={isPlaying ? 'Pausar' : 'Reproducir'}
                 className={`w-16 h-16 rounded-full ${accentClasses.bg} text-black flex items-center justify-center shadow-xl transform active:scale-95 transition`}
               >
                 {isPlaying ? <Pause className="w-8 h-8 fill-current" /> : <Play className="w-8 h-8 fill-current ml-1" />}
-              </button>
+              </button>}
 
               <button aria-label="Siguiente canción" onClick={handleNextTrack} className="p-3 text-zinc-300 hover:text-white">
                 <SkipForward className="w-7 h-7 fill-current" />
@@ -4727,12 +4753,12 @@ export default function App() {
                 <SkipBack className="w-5 h-5 fill-current" />
               </button>
 
-              <button
+              {currentTrack.sourceType === 'youtube' ? <span className="text-xs text-zinc-300">Controles en YouTube</span> : <button
                 onClick={togglePlay}
                 className={`w-10 h-10 rounded-full ${accentClasses.bg} ${accentClasses.hover} text-black flex items-center justify-center shadow-lg transition transform active:scale-95`}
               >
                 {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
-              </button>
+              </button>}
 
               <button onClick={handleNextTrack} className="text-zinc-300 hover:text-white transition">
                 <SkipForward className="w-5 h-5 fill-current" />
@@ -4750,7 +4776,7 @@ export default function App() {
             </div>
 
             {/* Barra de progreso o Indicador Radio */}
-            {currentTrack.sourceType === 'radio' ? (
+            {currentTrack.sourceType === 'youtube' ? <p className="text-xs text-zinc-400">Progreso y volumen en el reproductor de YouTube</p> : currentTrack.sourceType === 'radio' ? (
               <div className="w-full max-w-xl flex items-center justify-between px-4 py-1.5 rounded-xl bg-red-950/40 border border-red-500/40">
                 <div className="flex items-center gap-2.5 min-w-0">
                   <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />

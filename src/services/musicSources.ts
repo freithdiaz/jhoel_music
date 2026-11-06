@@ -10,6 +10,7 @@ export function trackSourcePriority(track: Track): number {
 }
 
 export function trackSourceLabel(track: Track): string {
+  if (track.sourceType === 'youtube') return 'YouTube · reproductor oficial';
   if (track.sourceType === 'itunes' || track.id.startsWith('itunes-')) return 'iTunes · vista previa';
   if (track.sourceType === 'jamendo') return 'Jamendo';
   if (track.sourceType === 'audius') return 'Audius';
@@ -23,7 +24,7 @@ export function trackSourceLabel(track: Track): string {
 export function playbackFailureMessage(track: Track): string {
   if (track.audioUrl?.startsWith('blob:')) return 'El archivo local no está disponible. Vuelve a cargarlo o revisa Descargas.';
   if (track.id.startsWith('yt-') || /\/stream_yt(?:\?|$)/.test(track.audioUrl || '')) {
-    return 'No se pudo reproducir esta pista de YouTube. El servidor o el proveedor podrían bloquearla; prueba Jamendo o Audius.';
+    return 'La reproducción de YouTube está deshabilitada por seguridad. Prueba Jamendo o Audius.';
   }
   return `No se pudo reproducir esta pista de ${trackSourceLabel(track)}. Puedes reintentar o elegir otra.`;
 }

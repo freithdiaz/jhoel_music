@@ -21,6 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY --from=frontend /usr/local/bin/node /usr/local/bin/node
 COPY --from=frontend /build/dist ./dist
 COPY server.py production.py ./
+COPY isolated/ipc.py ./isolated/ipc.py
 COPY scripts ./scripts
 USER music
 EXPOSE 8589

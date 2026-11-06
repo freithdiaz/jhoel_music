@@ -1,0 +1,47 @@
+services:
+  isolated-init:
+    image: python:3.11-slim-bookworm
+    network_mode: none
+    user: "0:0"
+    entrypoint: ["python", "-c", "import os; [(os.chown(p, 65534, 65534), os.chmod(p, 0o700)) for p in ('/run/egress', '/run/worker')]"]
+    volumes:
+      - isolated_socket:/run/egress
+      - worker_socket:/run/worker
+    profiles: [isolated-experiment]
+  isolated-proxy:
+    build:
+      context: .
+      dockerfile: isolated/Dockerfile
+    command: ["/app/egress.py"]
+    depends_on:
+      isolated-init:
+        condition: service_completed_successfully
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 128m
+    volumes:
+      - isolated_socket:/run/egress
+    profiles: [isolated-experiment]
+  isolated-worker:
+    build:
+      context: .
+      dockerfile: isolated/Dockerfile
+    network_mode: none
+    command: ["/app/ipc.py"]
+    depends_on:
+      isolated-proxy:
+        condition: service_started
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 64
+    mem_limit: 256m
+    volumes:
+      - isolated_socket:/run/egress:ro
+      - worker_socket:/run/worker
+    profiles: [isolated-experiment]
+volumes:
+  isolated_socket:
+  worker_socket:

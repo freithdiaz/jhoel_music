@@ -3,11 +3,18 @@ import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 
 const { outputFiles } = await build({ entryPoints: ['src/services/freeMusicApi.ts'], bundle: true, write: false, platform: 'node', format: 'esm' });
-const { searchFreeMusicOnline, fetchTrendingFreeTracks } = await import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].text).toString('base64')}`);
+const { searchFreeMusicOnline, fetchTrendingFreeTracks, fetchSearchSuggestions } = await import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].text).toString('base64')}`);
 globalThis.localStorage = { getItem: () => null };
 globalThis.window = { localStorage: globalThis.localStorage };
 const json = data => new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
 const jamendoTrack = { id: '123', name: 'Canción propia', artist_name: 'Artista', audio: 'https://jamendo.test/audio.mp3', duration: 180 };
+
+test('YouTube no consulta sugerencias externas', async () => {
+  let requested = false;
+  globalThis.fetch = async () => { requested = true; throw new Error('Solicitud inesperada'); };
+  assert.deepEqual(await fetchSearchSuggestions('artista', 'https://servidor.test/api', 'youtube'), []);
+  assert.equal(requested, false);
+});
 
 test('busca Jamendo primero y no llama al servidor de YouTube', async () => {
   const requests = [];

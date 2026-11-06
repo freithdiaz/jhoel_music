@@ -17,6 +17,11 @@ import hmac
 import secrets
 import re
 import threading
+import socket
+import ssl
+import ipaddress
+import http.client
+import queue
 from contextlib import closing
 from pathlib import Path
 from typing import List, Optional, Dict
@@ -25,8 +30,32 @@ from fastapi import FastAPI, HTTPException, Request, status, Query, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
+from dotenv import load_dotenv
+from isolated import ipc as worker_ipc
+
+# Opcional: configurar la variable YOUTUBE_API_KEY en el .env del proyecto;
+# las variables explícitas del proceso tienen prioridad.
+load_dotenv(Path(__file__).resolve().parent / ".env", override=False, encoding="utf-8-sig")
 
 app = FastAPI(title="Thomas Music Universal Streamer", version="2.7.0")
+
+def pilot_enabled():
+    return os.environ.get('MUSIC_ISOLATED_PILOT') == '1'
+
+@app.middleware('http')
+async def restrict_pilot_to_loopback(request, call_next):
+    if pilot_enabled() and request.url.path.rstrip('/').split('/')[-1] in ('stream_yt', 'search_online'):
+        try:
+            peer = ipaddress.ip_address(request.client.host)
+            host = request.url.hostname
+            if not peer.is_loopback or host not in ('localhost', '127.0.0.1', '::1'):
+                return JSONResponse(status_code=403, content={'detail': 'Acceso local únicamente'})
+            origin = request.headers.get('origin')
+            if origin and origin not in ('http://localhost:5173', 'http://127.0.0.1:5173'):
+                return JSONResponse(status_code=403, content={'detail': 'Origen no permitido'})
+        except (ValueError, AttributeError):
+            return JSONResponse(status_code=403, content={'detail': 'Acceso local únicamente'})
+    return await call_next(request)
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,6 +73,12 @@ SUPPORTED_EXTENSIONS = {".mp3", ".flac", ".wav", ".m4a", ".ogg"}
 # Cache en memoria para URLs de streaming de YouTube para que el seek y los saltos sean instantáneos
 STREAM_CACHE: Dict[str, tuple] = {}
 STREAM_LOCKS = [threading.Lock() for _ in range(64)]
+SEARCH_SLOTS = threading.BoundedSemaphore(6)
+
+class SilentYdlLogger:
+    def debug(self, message): pass
+    def warning(self, message): pass
+    def error(self, message): pass
 
 # Opciones ultrarrápidas de búsqueda: extract_flat=True (responde en ~1 segundo en vez de 19s)
 YDL_FAST_SEARCH_OPTS = {
@@ -52,7 +87,7 @@ YDL_FAST_SEARCH_OPTS = {
     'no_warnings': True,
     'noplaylist': True,
     'skip_download': True,
-    'js_runtimes': {'node': {}}
+    'js_runtimes': {'node': {}}, 'socket_timeout': 8, 'retries': 0, 'ignoreconfig': True, 'logger': SilentYdlLogger(),
 }
 
 # Opciones de extracción de audio individual al reproducir
@@ -62,30 +97,141 @@ YDL_STREAM_OPTS = {
     'quiet': True,
     'no_warnings': True,
     'skip_download': True,
-    'js_runtimes': {'node': {}}
+    'js_runtimes': {'node': {}}, 'socket_timeout': 8, 'retries': 0, 'ignoreconfig': True, 'logger': SilentYdlLogger(),
 }
 
+def valid_video_id(video_id: str) -> bool:
+    return isinstance(video_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) is not None
+
+def validate_upstream_url(url: str) -> str:
+    try:
+        if not isinstance(url, str) or len(url) > 8192 or any(ord(c) <= 32 or ord(c) >= 127 or c == '\\' for c in url):
+            raise ValueError('Invalid upstream URL')
+        parts = urllib.parse.urlsplit(url)
+        host = (parts.hostname or '').lower()
+        if (parts.scheme != 'https' or parts.username is not None or parts.password is not None
+                or parts.fragment or not re.fullmatch(r'[a-z0-9.-]+', host)
+                or parts.port not in (None, 443) or not any(host == domain or host.endswith('.' + domain)
+                for domain in ('youtube.com', 'googlevideo.com'))):
+            raise ValueError('Invalid upstream URL')
+    except (ValueError, TypeError):
+        raise ValueError('Invalid upstream URL') from None
+    return url
+
+class SafeStreamRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        validate_upstream_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+STREAM_TIMEOUT = 8
+STREAM_MAX_REDIRECTS = 5
+_DNS_SLOTS = threading.BoundedSemaphore(6)
+
+def _resolve_public(host):
+    # getaddrinfo no admite timeout; limitar también los resolvers que queden bloqueados.
+    if not _DNS_SLOTS.acquire(blocking=False):
+        raise TimeoutError('DNS unavailable')
+    result = queue.Queue(maxsize=1)
+    def resolve():
+        try:
+            result.put((True, socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)))
+        except Exception as exc:
+            result.put((False, exc))
+        finally:
+            _DNS_SLOTS.release()
+    try:
+        threading.Thread(target=resolve, daemon=True).start()
+    except Exception:
+        _DNS_SLOTS.release()
+        raise
+    try:
+        ok, addresses = result.get(timeout=STREAM_TIMEOUT)
+    except queue.Empty:
+        raise TimeoutError('DNS timeout') from None
+    if not ok:
+        raise OSError('DNS resolution failed') from addresses
+    if not addresses:
+        raise ValueError('No upstream addresses')
+    validated = []
+    for family, socktype, proto, _, sockaddr in addresses:
+        if family not in (socket.AF_INET, socket.AF_INET6) or socktype != socket.SOCK_STREAM:
+            raise ValueError('Invalid upstream address')
+        ip = ipaddress.ip_address(sockaddr[0])
+        if not ip.is_global or ip.is_multicast or ip.is_reserved or (isinstance(ip, ipaddress.IPv6Address) and (ip.ipv4_mapped or sockaddr[3])):
+            raise ValueError('Non-public upstream address')
+        if sockaddr[1] != 443:
+            raise ValueError('Invalid upstream port')
+        validated.append((family, socktype, proto, sockaddr))
+    return validated
+
+class _PinnedResponse:
+    def __init__(self, response, connection):
+        self._response = response
+        self._connection = connection
+        self.status = response.status
+        self.headers = response.headers
+
+    def read(self, size=-1):
+        return self._response.read(size)
+
+    def close(self):
+        try:
+            self._response.close()
+        finally:
+            self._connection.close()
+
+def open_stream_url(url, headers):
+    """Open an allowlisted HTTPS stream without proxying, cookies or DNS rebinding."""
+    if set(headers) - {'Range'} or ('Range' in headers and not validate_range_header(headers['Range'])):
+        raise ValueError('Invalid stream headers')
+    for hop in range(STREAM_MAX_REDIRECTS + 1):
+        validate_upstream_url(url)
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname.lower()
+        addresses = _resolve_public(host)
+        family, socktype, proto, sockaddr = addresses[0]
+        raw = socket.socket(family, socktype, proto)
+        connection = None
+        tls = None
+        try:
+            raw.settimeout(STREAM_TIMEOUT)
+            raw.connect(sockaddr)
+            tls = ssl.create_default_context().wrap_socket(raw, server_hostname=host)
+            connection = http.client.HTTPSConnection(host, timeout=STREAM_TIMEOUT)
+            connection.sock = tls
+            target = urllib.parse.urlunsplit(('', '', parts.path or '/', parts.query, ''))
+            connection.request('GET', target, headers={'Host': host, 'Accept-Encoding': 'identity', **headers})
+            response = connection.getresponse()
+            if response.status not in (301, 302, 303, 307, 308):
+                return _PinnedResponse(response, connection)
+            location = response.getheader('Location')
+            response.close()
+            connection.close()
+            if not location or hop == STREAM_MAX_REDIRECTS:
+                raise ValueError('Invalid stream redirect')
+            url = urllib.parse.urljoin(url, location)
+        except BaseException:
+            if connection is not None:
+                connection.close()
+            elif tls is not None:
+                tls.close()
+            raw.close()
+            raise
+
 def get_stream_url(video_id: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
-        raise ValueError("ID de video no válido")
+    if not valid_video_id(video_id):
+        raise ValueError('Invalid video ID')
     with STREAM_LOCKS[hash(video_id) % len(STREAM_LOCKS)]:
-        now = time.time()
-        if video_id in STREAM_CACHE:
-            cached_url, expiry = STREAM_CACHE[video_id]
-            if now < expiry:
-                return cached_url
-
-        target = f"https://www.youtube.com/watch?v={video_id}"
+        cached = STREAM_CACHE.get(video_id)
+        if cached and cached[1] > time.monotonic():
+            return validate_upstream_url(cached[0])
         with yt_dlp.YoutubeDL(YDL_STREAM_OPTS) as ydl:
-            info = ydl.extract_info(target, download=False)
-            url = info.get('url')
-            if not url:
-                raise ValueError("No se pudo obtener el stream de audio")
-
-            if len(STREAM_CACHE) >= 256:
-                STREAM_CACHE.pop(next(iter(STREAM_CACHE)))
-            STREAM_CACHE[video_id] = (url, time.time() + 14400)
-            return url
+            info = ydl.extract_info(f'https://www.youtube.com/watch?v={video_id}', download=False)
+        if info.get('has_drm'):
+            raise ValueError('Protected content is not supported')
+        url = validate_upstream_url(info.get('url'))
+        STREAM_CACHE[video_id] = (url, time.monotonic() + 300)
+        return url
 
 def invalidate_stream_url(video_id: str, rejected_url: str):
     with STREAM_LOCKS[hash(video_id) % len(STREAM_LOCKS)]:
@@ -350,72 +496,74 @@ def get_suggestions(q: str = Query(..., max_length=200, description="Término pa
         print(f"Error obteniendo sugerencias: {e}")
     return []
 
+@app.get("/youtube/search")
+def youtube_search(q: str = Query(..., min_length=2, max_length=200)):
+    key = os.environ.get("YOUTUBE_API_KEY", "").strip()
+    if not key:
+        raise HTTPException(status_code=503, detail="YouTube no está configurado: falta YOUTUBE_API_KEY en el servidor.")
+    query = q.strip()
+    if len(query) < 2:
+        raise HTTPException(status_code=422, detail="Escribe al menos dos caracteres.")
+    params = urllib.parse.urlencode({"part": "snippet", "type": "video", "videoEmbeddable": "true", "videoCategoryId": "10", "maxResults": 25, "q": query})
+    try:
+        request = urllib.request.Request("https://www.googleapis.com/youtube/v3/search?" + params, headers={"x-goog-api-key": key})
+        with urllib.request.urlopen(request, timeout=8) as response:
+            data = json.load(response)
+    except urllib.error.HTTPError as error:
+        error.close()
+        if error.code in (403, 429):
+            raise HTTPException(status_code=503, detail="YouTube rechazó la consulta: comprueba la clave, los permisos o la cuota.")
+        raise HTTPException(status_code=502, detail="No se pudo consultar YouTube.")
+    except (OSError, ValueError):
+        raise HTTPException(status_code=502, detail="No se pudo consultar YouTube.")
+    results = []
+    for item in data.get("items", []):
+        video_id = item.get("id", {}).get("videoId", "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+            continue
+        snippet = item.get("snippet", {})
+        results.append({"id": "yt-" + video_id, "title": snippet.get("title", "Video"),
+            "artist": snippet.get("channelTitle", "YouTube"), "album": "YouTube",
+            "duration": 0, "bpm": 0, "keySignature": "Desconocida", "energy": 0,
+            "acousticness": 0, "danceability": 0, "genre": "YouTube",
+            "coverUrl": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg", "audioUrl": "",
+            "sourceType": "youtube", "cachedOffline": False, "liked": False, "lyrics": []})
+    return results
+
 @app.get("/search_online")
 def search_online(
     q: str = Query(..., max_length=200, description="Nombre de la canción o artista"),
     limit: int = Query(25, description="Número de resultados a extraer")
 ):
-    """
-    Busca cualquier canción en YouTube Music con extract_flat=True.
-    Responde en ~1 segundo con canciones 100% completas (3 a 5 minutos).
-    """
     query = q.strip()
-    if not query:
-        return []
-
-    fetch_limit = min(max(limit, 10), 30)
+    if len(query) < 2:
+        raise HTTPException(status_code=422, detail="Escribe al menos dos caracteres.")
+    if not pilot_enabled():
+        raise HTTPException(status_code=503, detail='Búsqueda de YouTube deshabilitada por seguridad.')
+    if not worker_ipc.valid_text(query, worker_ipc.MAX_QUERY) or type(limit) is not int or not 1 <= limit <= 25:
+        raise HTTPException(status_code=422, detail='Consulta inválida')
+    limit = min(limit, worker_ipc.MAX_RESULTS)
+    if not SEARCH_SLOTS.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail='El servidor está ocupado. Inténtalo de nuevo.', headers={'Retry-After': '5'})
     try:
-        search_target = f"ytsearch{fetch_limit}:{query} audio"
-        with yt_dlp.YoutubeDL(YDL_FAST_SEARCH_OPTS) as ydl:
-            res = ydl.extract_info(search_target, download=False)
-            entries = res.get('entries', []) if res else []
-
-            results = []
-            for item in entries:
-                if not item:
-                    continue
-                video_id = item.get('id')
-                if not video_id:
-                    continue
-                title = item.get('title', 'Canción Completa')
-                uploader = item.get('channel') or item.get('uploader') or 'Artista Oficial'
-                duration = int(item.get('duration') or 210)
-
-                # Extraer miniatura de alta resolución
-                thumbnail = None
-                thumbnails = item.get('thumbnails')
-                if thumbnails and isinstance(thumbnails, list) and len(thumbnails) > 0:
-                    thumbnail = thumbnails[-1].get('url')
-                if not thumbnail:
-                    thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
-
-                results.append({
-                    "id": f"yt-{video_id}",
-                    "title": title or "Pista de Audio",
-                    "artist": uploader or "Artista",
-                    "album": "Audio Oficial Completo (Sin límite 30s)",
-                    "duration": duration,
-                    "bpm": 120,
-                    "keySignature": "C Major",
-                    "energy": 80,
-                    "acousticness": 25,
-                    "danceability": 80,
-                    "genre": "Música Universal",
-                    "coverUrl": thumbnail,
-                    "audioUrl": f"/stream_yt?v={video_id}",
-                    "sourceType": "invidious",
-                    "cachedOffline": False,
-                    "liked": False,
-                    "lyrics": [
-                        {"time": 0, "text": f"♪ Reproduciendo: {title} ♪"},
-                        {"time": 8, "text": "Audio completo sin límite de 30 segundos"},
-                        {"time": 25, "text": "Procesado en tiempo real con ecualizador DSP"}
-                    ]
-                })
-            return results
-    except Exception as e:
-        print(f"Error en search_online: {e}")
-        raise HTTPException(status_code=502, detail="No se pudo consultar el catálogo de audio")
+        data = worker_ipc.search(query, limit, path=os.environ.get('MUSIC_WORKER_SOCKET', worker_ipc.SOCKET))
+        if data.get('status') != 'ok':
+            raise ValueError('worker unavailable')
+        results = []
+        for item in data['results']:
+            video_id = item['video_id']
+            results.append({'id': 'yt-' + video_id, 'title': item['title'],
+                'artist': item['artist'], 'album': 'YouTube',
+                'duration': item.get('duration') or 0, 'bpm': 0, 'keySignature': 'Desconocida',
+                'energy': 0, 'acousticness': 0, 'danceability': 0, 'genre': 'YouTube',
+                'coverUrl': f'https://i.ytimg.com/vi/{video_id}/hqdefault.jpg',
+                'audioUrl': f'/stream_yt?v={video_id}', 'sourceType': 'invidious',
+                'cachedOffline': False, 'liked': False, 'lyrics': []})
+        return results
+    except Exception:
+        raise HTTPException(status_code=502, detail='No se pudo consultar el catálogo de audio') from None
+    finally:
+        SEARCH_SLOTS.release()
 
 # ==========================================
 # 2. PROXY DE STREAMING EN VIVO (CANCIONES COMPLETAS)
@@ -423,82 +571,73 @@ def search_online(
 @app.get("/prepare_stream")
 def prepare_stream(v: str = Query(..., min_length=11, max_length=11, pattern=r"^[A-Za-z0-9_-]{11}$")):
     """Prepara solo el enlace de la siguiente pista; no descarga el audio."""
+    if not valid_video_id(v):
+        raise HTTPException(status_code=422, detail='ID de video inválido')
+    raise HTTPException(status_code=503, detail='Streaming de YouTube deshabilitado por seguridad.')
+
+def _stream_pilot(v, range_header):
+    if not pilot_enabled():
+        raise HTTPException(status_code=503, detail='Streaming de YouTube deshabilitado por seguridad.')
+    if not SEARCH_SLOTS.acquire(blocking=False):
+        raise HTTPException(status_code=503, detail='Servidor ocupado')
+    upstream = None
     try:
-        get_stream_url(v)
-        return {"status": "ready"}
+        url = worker_ipc.extract(v, path=os.environ.get('MUSIC_WORKER_SOCKET', worker_ipc.SOCKET))
+        upstream = open_stream_url(validate_upstream_url(url), {'Range': range_header} if range_header else {})
+        if upstream.status not in (200, 206) or (range_header and upstream.status != 206):
+            raise ValueError('invalid upstream status')
+        headers = {'Cache-Control': 'no-store', 'Accept-Ranges': 'bytes',
+                   'Content-Type': 'application/octet-stream', 'X-Content-Type-Options': 'nosniff'}
+        for name in ('Content-Length', 'Content-Range'):
+            value = upstream.headers.get(name)
+            if value and len(value) <= 200 and all(32 <= ord(c) < 127 for c in value):
+                headers[name] = value
+        if 'Content-Length' in headers and not re.fullmatch(r'[0-9]{1,19}', headers['Content-Length']):
+            raise ValueError('invalid content length')
+        if upstream.status == 206 and not re.fullmatch(r'bytes [0-9]{1,19}-[0-9]{1,19}/(?:[0-9]{1,19}|\*)', headers.get('Content-Range', '')):
+            raise ValueError('invalid content range')
+        def chunks():
+            try:
+                while True:
+                    chunk = upstream.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
+            except Exception:
+                return
+            finally:
+                upstream.close()
+                SEARCH_SLOTS.release()
+        return StreamingResponse(chunks(), status_code=upstream.status, headers=headers)
     except Exception:
-        raise HTTPException(status_code=502, detail="No se pudo preparar la pista")
+        if upstream is not None:
+            upstream.close()
+        SEARCH_SLOTS.release()
+        raise HTTPException(status_code=502, detail='No se pudo abrir el audio') from None
+
+def validate_range_header(value: str) -> bool:
+    match = re.fullmatch(r'bytes=(\d{1,19})?-(\d{1,19})?', value, flags=re.ASCII)
+    if not match or not any(match.groups()):
+        return False
+    start, end = match.groups()
+    if start is None:
+        return int(end) > 0
+    return end is None or int(start) <= int(end)
 
 @app.get("/stream_yt")
-def stream_yt(request: Request, v: str = Query(..., min_length=11, max_length=11, description="ID del video de YouTube")):
+def stream_yt(request: Request, v: str = Query(..., min_length=11, max_length=11, pattern=r"^[A-Za-z0-9_-]{11}$", description="ID del video de YouTube")):
     """
     Proxy de streaming en tiempo real:
     Lee los bytes directamente de los servidores CDN de YouTube y los envía al celular/PC
     con soporte de Range Requests y cabeceras CORS.
     NO hay límite de 30 segundos: se reproduce la canción COMPLETA de inicio a fin.
     """
-    try:
-        stream_url = get_stream_url(v)
-    except Exception as err:
-        print(f"Error extrayendo stream: {err}")
-        raise HTTPException(status_code=502, detail="No se pudo preparar el audio")
-
-    # Manejar petición de Range
-    range_header = request.headers.get("range")
-    req_headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Encoding": "identity"
-    }
-    if range_header:
-        req_headers["Range"] = range_header
-
-    try:
-        upstream_req = urllib.request.Request(stream_url, headers=req_headers)
-        try:
-            upstream_resp = urllib.request.urlopen(upstream_req, timeout=12)
-        except urllib.error.HTTPError as err:
-            if err.code not in (403, 410):
-                raise
-            err.close()
-            invalidate_stream_url(v, stream_url)
-            stream_url = get_stream_url(v)
-            upstream_req = urllib.request.Request(stream_url, headers=req_headers)
-            upstream_resp = urllib.request.urlopen(upstream_req, timeout=12)
-
-        def iter_chunks():
-            try:
-                while True:
-                    chunk = upstream_resp.read(64 * 1024)
-                    if not chunk:
-                        break
-                    yield chunk
-            except Exception as stream_err:
-                print(f"Stream terminado: {stream_err}")
-            finally:
-                upstream_resp.close()
-
-        res_headers = {
-            "Accept-Ranges": "bytes",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-            "Access-Control-Expose-Headers": "Content-Range, Content-Length, Accept-Ranges"
-        }
-
-        for h in ["Content-Range", "Content-Length", "Content-Type"]:
-            val = upstream_resp.headers.get(h)
-            if val:
-                res_headers[h] = val
-
-        return StreamingResponse(
-            iter_chunks(),
-            status_code=upstream_resp.status,
-            headers=res_headers
-        )
-    except Exception as e:
-        print(f"Error transmitiendo datos del stream: {e}")
-        raise HTTPException(status_code=502, detail="La fuente de audio no está disponible")
-
+    if not valid_video_id(v):
+        raise HTTPException(status_code=422, detail='ID de video inválido')
+    range_header = request.headers.get('range')
+    if range_header is not None and not validate_range_header(range_header):
+        raise HTTPException(status_code=416, detail='Range inválido')
+    return _stream_pilot(v, range_header)
 # ==========================================
 # 3. RESOLVER ENLACES DE SPOTIFY A CANCIONES COMPLETAS
 # ==========================================
@@ -508,6 +647,8 @@ def resolve_spotify(url: str = Query(..., max_length=2048, description="URL de S
     Recibe un enlace de Spotify, extrae metadata de Spotify y resuelve
     hacia la pista oficial completa en streaming sin límite de tiempo.
     """
+    # También utiliza el extractor heredado; no consultar siquiera oEmbed mientras esté bloqueado.
+    raise HTTPException(status_code=503, detail='Resolución de YouTube deshabilitada por seguridad.')
     try:
         oembed_url = f"https://open.spotify.com/oembed?url={urllib.parse.quote(url)}"
         req = urllib.request.Request(oembed_url, headers={'User-Agent': 'Mozilla/5.0'})

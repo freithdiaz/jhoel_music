@@ -22,7 +22,7 @@ export interface Track {
   genre: string;
   coverUrl: string;
   audioUrl: string;
-  sourceType: 'curated' | 'audius' | 'invidious' | 'local-file' | 'fastapi' | 'rea-reverse' | 'jamendo' | 'itunes' | 'radio';
+  sourceType: 'curated' | 'audius' | 'invidious' | 'local-file' | 'fastapi' | 'rea-reverse' | 'jamendo' | 'itunes' | 'radio' | 'youtube';
   cachedOffline: boolean;
   liked: boolean;
   lyrics: LyricLine[];

@@ -35,6 +35,7 @@ function openDB(): Promise<IDBDatabase> {
 export async function saveTrackOffline(track: Track): Promise<Track> {
   if (track.sourceType === 'radio') throw new Error('Las emisoras en vivo no se pueden guardar sin conexión.');
   if (track.sourceType === 'itunes' || track.id.startsWith('itunes-')) throw new Error('Las vistas previas de iTunes no se guardan en la bóveda.');
+  if (track.sourceType === 'youtube' || track.sourceType === 'invidious' || track.id.startsWith('yt-') || /\/stream_yt(?:\?|$)/.test(track.audioUrl || '')) throw new Error('YouTube no se guarda en la bóveda.');
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 180000);
   let audioBlob: Blob;

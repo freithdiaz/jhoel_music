@@ -31,3 +31,12 @@ test('no descarga vistas previas de iTunes, incluidas las guardadas con el tipo 
   await assert.rejects(() => saveTrackOffline({ ...track, id: 'itunes-1', sourceType: 'invidious' }), /vistas previas/);
   assert.equal(fetched, false);
 });
+
+test('nunca descarga resultados de YouTube ni enlaces antiguos', async () => {
+  let fetched = false;
+  globalThis.fetch = async () => { fetched = true; return new Response(); };
+  for (const item of [{ ...track, id: 'yt-abcdefghijk', sourceType: 'youtube' }, { ...track, audioUrl: '/stream_yt?v=abcdefghijk' }]) {
+    await assert.rejects(() => saveTrackOffline(item), /YouTube/);
+  }
+  assert.equal(fetched, false);
+});

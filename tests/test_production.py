@@ -48,6 +48,14 @@ class ProductionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 422)
         self.assertEqual((await self.client.post('/api/auth/login', json={})).status_code, 429)
 
+    async def test_stream_disabled_and_range_rejected(self):
+        response = await self.client.get('/api/stream_yt?v=abcdefghijk', headers={'Range': 'bytes=0-10'})
+        self.assertEqual(response.status_code, 503)
+        self.assertIn('deshabilitado', response.json()['detail'])
+        response = await self.client.get('/api/stream_yt?v=abcdefghijk', headers={'Range': 'bytes=0-1,3-4'})
+        self.assertEqual(response.status_code, 416)
+        self.assertEqual((await self.client.get('/api/prepare_stream?v=abcdefghijk')).status_code, 503)
+
     async def test_concurrent_streams_are_limited(self):
         started = 0
         all_started = asyncio.Event()

@@ -61,31 +61,18 @@ class SecurityTests(unittest.TestCase):
             server.stream_radio_proxy("http://127.0.0.1/")
         self.assertEqual(denied.exception.status_code, 403)
 
-    def test_prepared_stream_reuses_resolved_url(self):
-        video_id = "abcDEF123_-"
-        server.STREAM_CACHE.pop(video_id, None)
+    def test_invalid_video_id_does_not_extract_youtube_audio(self):
         with patch.object(server.yt_dlp, "YoutubeDL") as downloader:
-            downloader.return_value.__enter__.return_value.extract_info.return_value = {"url": "https://example.org/audio"}
-            self.assertEqual(server.prepare_stream(video_id), {"status": "ready"})
-            self.assertEqual(server.get_stream_url(video_id), "https://example.org/audio")
-            self.assertEqual(downloader.return_value.__enter__.return_value.extract_info.call_count, 1)
-        server.STREAM_CACHE.pop(video_id, None)
-        with self.assertRaises(ValueError):
-            server.get_stream_url("invalid/url")
+            with self.assertRaises(HTTPException):
+                server.prepare_stream("abcDEF123_/")
+            downloader.assert_not_called()
 
-    def test_rejected_cached_stream_is_refreshed_once(self):
+    def test_untrusted_youtube_stream_does_not_contact_upstream(self):
         request = Request({"type": "http", "method": "GET", "path": "/stream_yt", "headers": [(b"range", b"bytes=0-10")]})
-        rejected = urllib.error.HTTPError("https://example.org/old", 403, "Forbidden", {}, None)
-        upstream = SimpleNamespace(status=206, headers={"Content-Type": "audio/mp4"})
-        with patch.object(server, "get_stream_url", side_effect=["https://example.org/old", "https://example.org/new"]) as get_url, \
-             patch.object(server, "invalidate_stream_url") as invalidate, \
-             patch.object(server.urllib.request, "urlopen", side_effect=[rejected, upstream]) as open_url:
-            response = server.stream_yt(request, "abcDEF123_-")
-        self.assertEqual(response.status_code, 206)
-        self.assertEqual(get_url.call_count, 2)
-        invalidate.assert_called_once_with("abcDEF123_-", "https://example.org/old")
-        self.assertEqual(open_url.call_count, 2)
-        self.assertEqual(open_url.call_args[0][0].get_header("Range"), "bytes=0-10")
+        with patch.object(server, 'get_stream_url', return_value='https://evil.test/'), patch.object(server.urllib.request, "build_opener") as open_url:
+            with self.assertRaises(HTTPException):
+                server.stream_yt(request, "abcDEF123_-")
+            open_url.assert_not_called()
 
     def test_stale_sync_cannot_overwrite_newer_data(self):
         user = server.register(server.RegisterRequest(username="alice", password="password123"))
