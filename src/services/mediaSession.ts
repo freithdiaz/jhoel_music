@@ -19,7 +19,7 @@ export function updateMediaSessionMetadata(track: Track) {
   navigator.mediaSession.metadata = new MediaMetadata({
     title: track.title,
     artist: track.artist,
-    album: track.album || 'Diaz Music Studio',
+    album: track.album || 'Thomas Music',
     artwork: [
       { src: cover, sizes: '96x96', type: 'image/jpeg' },
       { src: cover, sizes: '128x128', type: 'image/jpeg' },
@@ -29,6 +29,12 @@ export function updateMediaSessionMetadata(track: Track) {
       { src: cover, sizes: '512x512', type: 'image/jpeg' },
     ]
   });
+
+  try {
+    navigator.mediaSession.playbackState = 'playing';
+  } catch {
+    // ignorar si no soportado
+  }
 }
 
 export function updateMediaSessionPosition(currentTime: number, duration: number, playbackRate = 1.0) {

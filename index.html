@@ -7,9 +7,9 @@
     <meta name="theme-color" content="#0b0d10" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="Diaz Music" />
+    <meta name="apple-mobile-web-app-title" content="Thomas Music" />
     <link rel="manifest" href="/manifest.webmanifest" />
-    <title>Diaz Music • Spotify Clone Studio PWA</title>
+    <title>Thomas Music</title>
   </head>
   <body class="bg-[#0b0d10] text-zinc-100 antialiased select-none overflow-x-hidden min-h-screen">
     <div id="root"></div>
@@ -19,7 +19,7 @@
       if ('serviceWorker' in navigator) {
         window.addEventListener('load', () => {
           navigator.serviceWorker.register('/sw.js')
-            .then((reg) => console.log('Diaz Music PWA Service Worker registrado:', reg.scope))
+            .then((reg) => console.log('Thomas Music PWA Service Worker registrado:', reg.scope))
             .catch((err) => console.warn('Fallo registro Service Worker:', err));
         });
       }

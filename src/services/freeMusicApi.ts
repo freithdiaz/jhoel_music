@@ -1,7 +1,7 @@
 import { Track } from '../types';
 import { searchJamendoTracks } from './jamendoApi';
 
-const AUDIUS_APP_NAME = 'diaz_music_pwa';
+const AUDIUS_APP_NAME = 'thomas_music_pwa';
 const AUDIUS_HOSTS = [
   'https://discoveryprovider.audius.co',
   'https://audius-discovery-1.cultur3stake.com',
@@ -65,7 +65,61 @@ export async function fetchTrendingFreeTracks(): Promise<Track[]> {
   }
 }
 
-// 2. Búsqueda Universal en Vivo de cualquier música en internet
+// 2. Autocompletado de Sugerencias en Tiempo Real (FastAPI + iTunes Suggest)
+export async function fetchSearchSuggestions(query: string, fastApiBaseUrl?: string): Promise<string[]> {
+  const q = query.trim();
+  if (!q || q.length < 1) return [];
+
+  // Paso 1: Si hay servidor FastAPI activo, consultar el motor de sugerencias instantáneo
+  if (fastApiBaseUrl) {
+    try {
+      const res = await fetch(`${fastApiBaseUrl}/suggestions?q=${encodeURIComponent(q)}`, {
+        signal: AbortSignal.timeout(1400)
+      });
+      if (res.ok) {
+        const list = await res.json();
+        if (Array.isArray(list) && list.length > 0) {
+          return list.slice(0, 8);
+        }
+      }
+    } catch {
+      // Continuar con fallback
+    }
+  }
+
+  // Paso 2: Fallback con iTunes API pública (CORS habilitado por defecto)
+  try {
+    const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=musicArtist,song&limit=8`;
+    const res = await fetch(itunesUrl, { signal: AbortSignal.timeout(1800) });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.results && data.results.length > 0) {
+        const seen = new Set<string>();
+        const suggestions: string[] = [];
+        data.results.forEach((item: any) => {
+          if (item.artistName && !seen.has(item.artistName.toLowerCase())) {
+            seen.add(item.artistName.toLowerCase());
+            suggestions.push(item.artistName);
+          }
+          if (item.trackName && item.artistName) {
+            const songName = `${item.artistName} - ${item.trackName}`;
+            if (!seen.has(songName.toLowerCase())) {
+              seen.add(songName.toLowerCase());
+              suggestions.push(songName);
+            }
+          }
+        });
+        return suggestions.slice(0, 8);
+      }
+    }
+  } catch {
+    // Si falla la red exterior
+  }
+
+  return [];
+}
+
+// 3. Búsqueda Universal en Vivo de cualquier música en internet
 // Intenta primero el Servidor FastAPI yt-dlp local (si está activo, da la canción COMPLETA de YouTube Music)
 // Si no está activo el servidor, usa el catálogo global iTunes (cualquier artista del mundo con preview de estudio oficial) y Audius
 export async function searchFreeMusicOnline(query: string, fastApiBaseUrl?: string): Promise<Track[]> {
@@ -75,8 +129,8 @@ export async function searchFreeMusicOnline(query: string, fastApiBaseUrl?: stri
   // Opción A: Probar Servidor FastAPI / yt-dlp local si está configurado
   if (fastApiBaseUrl) {
     try {
-      const serverRes = await fetch(`${fastApiBaseUrl}/search_online?q=${encodeURIComponent(q)}`, {
-        signal: AbortSignal.timeout(10000)
+      const serverRes = await fetch(`${fastApiBaseUrl}/search_online?q=${encodeURIComponent(q)}&limit=25`, {
+        signal: AbortSignal.timeout(12000)
       });
       if (serverRes.ok) {
         const items = await serverRes.json();
@@ -124,7 +178,7 @@ export async function searchFreeMusicOnline(query: string, fastApiBaseUrl?: stri
   // Opción C: Búsqueda Global en Catálogo Universal Oficial (iTunes Open API)
   // Contiene LITERALMENTE cualquier artista comercial (Coldplay, Bad Bunny, Shakira, Queen, Eminem, etc.)
   try {
-    const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=15`;
+    const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&entity=song&limit=25`;
     const res = await fetch(itunesUrl, { signal: AbortSignal.timeout(4000) });
     if (res.ok) {
       const data = await res.json();

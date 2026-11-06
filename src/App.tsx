@@ -6,10 +6,20 @@ import {
   Trash2, RefreshCw, ChevronRight, Headphones, Zap, Eye, Mic2, Share2,
   Bookmark, AlertCircle, Settings, Flame, Compass, ShieldCheck, Lock,
   Unlock, BarChart3, ListMusic, Minimize2, Maximize2, ChevronDown,
-  Smartphone, Bluetooth, Globe, Link2, ExternalLink
+  Smartphone, Bluetooth, Globe, Link2, ExternalLink, FolderPlus, ListPlus,
+  Folder, ArrowRight, ChevronLeft, Check, X, Filter, User, LogIn, LogOut,
+  UserPlus, ShieldAlert, Palette
 } from 'lucide-react';
 
-import { Track, VisualizerMode, ThemeAccent, AudioPreset, ActiveTab } from './types';
+import { Track, Playlist, UserProfile, UserData, VisualizerMode, ThemeAccent, AudioPreset, ActiveTab } from './types';
+import {
+  getCurrentUser,
+  setCurrentUser as saveSessionUser,
+  loginUser,
+  registerUser,
+  getLocalUserData,
+  saveLocalUserData
+} from './services/authService';
 import {
   updateMediaSessionMetadata,
   updateMediaSessionPosition,
@@ -23,7 +33,7 @@ import {
   getAllOfflineTracks,
   exportDrmFreeFile
 } from './services/offlineVault';
-import { fetchTrendingFreeTracks, searchFreeMusicOnline } from './services/freeMusicApi';
+import { fetchTrendingFreeTracks, searchFreeMusicOnline, fetchSearchSuggestions } from './services/freeMusicApi';
 import { resolveSpotifyTrackViaRea } from './services/reaBridge';
 import {
   getStoredJamendoClientId,
@@ -63,7 +73,7 @@ const INITIAL_TRACKS: Track[] = [
       { time: 0, text: "♪ [Intro Sintetizador Analógico Arpegiado] ♪" },
       { time: 12, text: "Cruising through the rain on the peripheral highway" },
       { time: 24, text: "Las luces de neón reflejan el código en el cristal" },
-      { time: 38, text: "Sin anuncios, sin suscripciones, nuestro propio clon libre" },
+      { time: 38, text: "Sin anuncios, sin suscripciones, tu música siempre contigo" },
       { time: 55, text: "Subiendo la frecuencia en el filtro pasa-bajos DSP" },
       { time: 75, text: "♪ [Solo de Bajo FM & Batería 808 en Audífonos] ♪" },
       { time: 110, text: "Controlando el tempo desde el intercomunicador" },
@@ -202,6 +212,86 @@ const EQ_BANDS = [
   { freq: 14000, label: '14kHz (Aire)' },
 ];
 
+function BabyHeadphonesIcon({ className = "w-10 h-10" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 512 512" className={className} xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="babySkin" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stopColor="#ffe3cf" />
+          <stop offset="100%" stopColor="#fcd0b1" />
+        </linearGradient>
+        <linearGradient id="babyHpGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stopColor="#06b6d4" />
+          <stop offset="50%" stopColor="#3b82f6" />
+          <stop offset="100%" stopColor="#ec4899" />
+        </linearGradient>
+      </defs>
+
+      {/* Diadema acolchada de los audífonos */}
+      <path d="M 140 260 C 140 110, 372 110, 372 260" fill="none" stroke="url(#babyHpGrad)" strokeWidth="26" strokeLinecap="round" />
+      <path d="M 195 142 C 220 132, 292 132, 317 142" fill="none" stroke="#1f2430" strokeWidth="30" strokeLinecap="round" />
+
+      {/* Cabeza del bebé sonriente */}
+      <circle cx="256" cy="285" r="115" fill="url(#babySkin)" />
+
+      {/* Orejitas */}
+      <circle cx="152" cy="285" r="26" fill="#fcd0b1" />
+      <circle cx="360" cy="285" r="26" fill="#fcd0b1" />
+
+      {/* Rizo de pelo tierno de bebé */}
+      <path d="M 256 170 C 248 140, 276 135, 272 155 C 270 162, 264 168, 256 170 Z" fill="#784421" />
+
+      {/* Cejitas */}
+      <path d="M 198 238 C 210 230, 225 232, 230 238" fill="none" stroke="#8d5027" strokeWidth="5" strokeLinecap="round" />
+      <path d="M 314 238 C 302 230, 287 232, 282 238" fill="none" stroke="#8d5027" strokeWidth="5" strokeLinecap="round" />
+
+      {/* Ojos grandes y tiernos de bebé */}
+      <ellipse cx="212" cy="265" rx="18" ry="22" fill="#261b17" />
+      <circle cx="217" cy="257" r="7" fill="#ffffff" />
+      <circle cx="206" cy="273" r="3" fill="#ffffff" />
+
+      <ellipse cx="300" cy="265" rx="18" ry="22" fill="#261b17" />
+      <circle cx="305" cy="257" r="7" fill="#ffffff" />
+      <circle cx="294" cy="273" r="3" fill="#ffffff" />
+
+      {/* Mejillas sonrojadas rosaditas */}
+      <ellipse cx="185" cy="295" rx="18" ry="11" fill="#ff7f9d" opacity="0.65" />
+      <ellipse cx="327" cy="295" rx="18" ry="11" fill="#ff7f9d" opacity="0.65" />
+
+      {/* Nariz tierna */}
+      <ellipse cx="256" cy="285" rx="5" ry="3.5" fill="#e89e78" />
+
+      {/* Sonrisa alegre escuchando música */}
+      <path d="M 234 308 C 238 335, 274 335, 278 308" fill="#d84860" stroke="#7e1f30" strokeWidth="3" strokeLinecap="round" />
+      <path d="M 242 312 C 248 322, 264 322, 270 312" fill="#ff7088" />
+
+      {/* Almohadillas DJ Over-Ear con ondas de sonido */}
+      <rect x="110" y="220" width="46" height="110" rx="23" fill="#181c26" stroke="url(#babyHpGrad)" strokeWidth="4" />
+      <rect x="122" y="238" width="22" height="74" rx="11" fill="#0b0d14" />
+      <path d="M 127 275 L 133 268 L 137 282 L 141 275" fill="none" stroke="#06b6d4" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+
+      <rect x="356" y="220" width="46" height="110" rx="23" fill="#181c26" stroke="url(#babyHpGrad)" strokeWidth="4" />
+      <rect x="368" y="238" width="22" height="74" rx="11" fill="#0b0d14" />
+      <path d="M 373 275 L 379 268 L 383 282 L 387 275" fill="none" stroke="#ec4899" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+
+      {/* Corbatín DJ elegante */}
+      <g transform="translate(256, 395)">
+        <path d="M -26 -13 L 0 0 L -26 13 Z" fill="url(#babyHpGrad)" />
+        <path d="M 26 -13 L 0 0 L 26 13 Z" fill="url(#babyHpGrad)" />
+        <circle cx="0" cy="0" r="6" fill="#ffffff" />
+      </g>
+    </svg>
+  );
+}
+
+const THEMES_LIST: { id: ThemeAccent; label: string; color: string; desc: string }[] = [
+  { id: 'emerald', label: 'Verde Spotify', color: 'bg-emerald-500', desc: 'Clásico y limpio' },
+  { id: 'blue', label: 'Azul Eléctrico', color: 'bg-blue-500', desc: 'Moderno y vibrante' },
+  { id: 'pink', label: 'Rosado Neón', color: 'bg-pink-500', desc: 'Estilo Karol G / Glam' },
+  { id: 'violet', label: 'Violeta Pro', color: 'bg-violet-500', desc: 'Profundo y elegante' },
+  { id: 'cyberpunk', label: 'Ámbar Cyberpunk', color: 'bg-rose-500', desc: 'Cálido y futurista' }
+];
+
 export default function App() {
   // ==========================================
   // ESTADOS PRINCIPALES DE LA APLICACIÓN
@@ -218,8 +308,144 @@ export default function App() {
   const [isSearchingOnline, setIsSearchingOnline] = useState(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>('home');
   const [visualizerMode, setVisualizerMode] = useState<VisualizerMode>('bars');
-  const [themeAccent, setThemeAccent] = useState<ThemeAccent>('emerald');
+  const [themeAccent, setThemeAccent] = useState<ThemeAccent>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('thomas_music_theme');
+        if (saved && ['emerald', 'blue', 'pink', 'cyberpunk', 'purple'].includes(saved)) {
+          return saved as ThemeAccent;
+        }
+      } catch {}
+    }
+    return 'emerald';
+  });
   const [isMobileNowPlayingOpen, setIsMobileNowPlayingOpen] = useState(false);
+  const [isThemeModalOpen, setIsThemeModalOpen] = useState(false);
+
+  // Persistir tema seleccionado permanentemente en el navegador
+  useEffect(() => {
+    try {
+      localStorage.setItem('thomas_music_theme', themeAccent);
+    } catch {}
+  }, [themeAccent]);
+
+  // ==========================================
+  // SUGERENCIAS EN TIEMPO REAL & PAGINACIÓN DE BÚSQUEDA
+  // ==========================================
+  const [searchSuggestions, setSearchSuggestions] = useState<string[]>([]);
+  const [isSuggestionsOpen, setIsSuggestionsOpen] = useState(false);
+  const [searchCurrentPage, setSearchCurrentPage] = useState(1);
+  const SEARCH_PAGE_SIZE = 10;
+  const searchDebounceRef = useRef<any>(null);
+
+  // Paginación limpia para Inicio & Tendencias (Máximo 10 por vista con botones siguiente/anterior)
+  const [homeCurrentPage, setHomeCurrentPage] = useState(1);
+  const HOME_PAGE_SIZE = 10;
+
+  // Servidor FastAPI Local (Auto-detección según el host)
+  const defaultHost = typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : 'localhost';
+  const [fastApiUrl, setFastApiUrl] = useState(`http://${defaultHost}:8000`);
+  const [serverStatus, setServerStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
+
+  // ==========================================
+  // AUTENTICACIÓN & SESIÓN MULTIUSUARIO (USUARIO Y CONTRASEÑA)
+  // ==========================================
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(() => getCurrentUser());
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [authUsername, setAuthUsername] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authDisplayName, setAuthDisplayName] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+  const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+
+  // Inicializar datos del usuario actual (o invitado)
+  const initialUserData = useMemo(() => {
+    return getLocalUserData(currentUser ? currentUser.username : 'invitado');
+  }, []);
+
+  // ==========================================
+  // LISTAS DE REPRODUCCIÓN (PLAYLISTS AISLADAS POR USUARIO)
+  // ==========================================
+  const [playlists, setPlaylists] = useState<Playlist[]>(() => initialUserData.playlists);
+  const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | null>(null);
+  const [isNewPlaylistModalOpen, setIsNewPlaylistModalOpen] = useState(false);
+  const [newPlaylistName, setNewPlaylistName] = useState('');
+  const [newPlaylistDesc, setNewPlaylistDesc] = useState('');
+  const [playlistModalTrack, setPlaylistModalTrack] = useState<Track | null>(null);
+
+  // ==========================================
+  // HISTORIAL SPOTIFY (+50% ESCUCHADO & GUSTOS AISLADOS)
+  // ==========================================
+  const [favorites50List, setFavorites50List] = useState<Track[]>(() => initialUserData.favorites50List);
+  const [userTasteProfile, setUserTasteProfile] = useState<{
+    favoriteArtists: Record<string, number>;
+    favoriteGenres: Record<string, number>;
+  }>(() => initialUserData.userTasteProfile);
+
+  const listened50TrackIdsRef = useRef<Set<string>>(new Set());
+
+  // Guardar datos del usuario activo en cada cambio
+  useEffect(() => {
+    const u = currentUser ? currentUser.username : 'invitado';
+    saveLocalUserData(u, { playlists, favorites50List, userTasteProfile }, fastApiUrl);
+  }, [playlists, favorites50List, userTasteProfile, currentUser, fastApiUrl]);
+
+  // Modal para configuración de Servidor
+  const [showServerModal, setShowServerModal] = useState(false);
+
+  // Métodos de autenticación
+  const applyLoadedUserData = (user: UserProfile | null, data?: UserData) => {
+    setCurrentUser(user);
+    saveSessionUser(user);
+    const uData = data || getLocalUserData(user ? user.username : 'invitado');
+    setPlaylists(uData.playlists || []);
+    setFavorites50List(uData.favorites50List || []);
+    setUserTasteProfile(uData.userTasteProfile || { favoriteArtists: {}, favoriteGenres: {} });
+    setSelectedPlaylistId(null);
+  };
+
+  const handleLoginSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    setIsAuthLoading(true);
+    try {
+      const res = await loginUser(authUsername, authPassword, fastApiUrl);
+      applyLoadedUserData(res.user, res.data);
+      setIsAuthModalOpen(false);
+      setAuthPassword('');
+      showToast(`¡Bienvenido de nuevo, ${res.user.displayName}!`);
+    } catch (err: any) {
+      setAuthError(err.message || 'Error al iniciar sesión');
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError(null);
+    setIsAuthLoading(true);
+    try {
+      const res = await registerUser(authUsername, authPassword, authDisplayName, fastApiUrl);
+      applyLoadedUserData(res.user, res.data);
+      setIsAuthModalOpen(false);
+      setAuthPassword('');
+      showToast(`¡Cuenta creada con éxito! Bienvenido, ${res.user.displayName}`);
+    } catch (err: any) {
+      setAuthError(err.message || 'Error al crear cuenta');
+    } finally {
+      setIsAuthLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    saveSessionUser(null);
+    applyLoadedUserData(null);
+    setIsUserMenuOpen(false);
+    showToast('Sesión cerrada. Modo invitado activo.');
+  };
 
   // PWA & Hardware Intercom States
   const [deferredInstallPrompt, setDeferredInstallPrompt] = useState<any>(null);
@@ -362,19 +588,26 @@ export default function App() {
     setLoopA(null);
     setLoopB(null);
 
-    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-      audioCtxRef.current.resume();
+    // Pausar reproductor de pistas si estaba activo
+    if (audioRef.current) {
+      audioRef.current.pause();
     }
 
-    if (audioRef.current) {
-      audioRef.current.src = station.audioUrl;
-      audioRef.current.load();
-      audioRef.current.play().catch((err) => {
+    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+      audioCtxRef.current.resume().catch(console.warn);
+    }
+
+    // El stream de radio usa el reproductor nativo radioAudioRef sin restricciones CORS
+    if (radioAudioRef.current) {
+      radioAudioRef.current.src = station.audioUrl;
+      radioAudioRef.current.volume = isMuted ? 0 : Math.min(1, Math.max(0, volume));
+      radioAudioRef.current.load();
+      radioAudioRef.current.play().catch((err) => {
         console.warn('Reintentando conexión con emisora:', err);
         setTimeout(() => {
-          if (audioRef.current) {
-            audioRef.current.load();
-            audioRef.current.play().catch(console.warn);
+          if (radioAudioRef.current) {
+            radioAudioRef.current.load();
+            radioAudioRef.current.play().catch(console.warn);
           }
         }, 150);
       });
@@ -383,10 +616,6 @@ export default function App() {
     showToast(`🔴 Sintonizando en vivo: ${station.title}`);
   };
 
-  // Servidor FastAPI Local (Auto-detección según el host)
-  const defaultHost = typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : 'localhost';
-  const [fastApiUrl, setFastApiUrl] = useState(`http://${defaultHost}:8000`);
-  const [serverStatus, setServerStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [notification, setNotification] = useState<string | null>(null);
 
@@ -405,8 +634,9 @@ export default function App() {
     autoProbeServer();
   }, [fastApiUrl]);
 
-  // Audio References
+  // Audio References (Doble canal independiente: Música DSP y Radio Nativa sin cortes)
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const radioAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const eqNodesRef = useRef<BiquadFilterNode[]>([]);
@@ -424,6 +654,159 @@ export default function App() {
     setNotification(msg);
     setTimeout(() => setNotification(null), 3800);
   };
+
+  // ==========================================
+  // ALGORITMO SPOTIFY (+50% ESCUCHADO)
+  // ==========================================
+  const registerTrack50PercentListened = (track: Track) => {
+    if (!track || !track.id) return;
+    setFavorites50List((prev) => {
+      const exists = prev.some((t) => t.id === track.id || (t.title === track.title && t.artist === track.artist));
+      if (exists) return prev;
+      const updated = [{ ...track, liked: true }, ...prev];
+      try {
+        localStorage.setItem('thomas_music_favorites_50', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    setUserTasteProfile((prev) => {
+      const artCount = (prev.favoriteArtists[track.artist] || 0) + 1;
+      const genCount = (prev.favoriteGenres[track.genre] || 0) + 1;
+      const updated = {
+        favoriteArtists: { ...prev.favoriteArtists, [track.artist]: artCount },
+        favoriteGenres: { ...prev.favoriteGenres, [track.genre]: genCount }
+      };
+      try {
+        localStorage.setItem('thomas_music_taste_profile', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    showToast(`❤️ ¡Guardada en Favoritas! Escuchaste +50% de "${track.title}"`);
+  };
+
+  // ==========================================
+  // GESTIÓN DE PLAYLISTS
+  // ==========================================
+  const handleCreatePlaylist = (name: string, description?: string) => {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      showToast('Por favor escribe un nombre para la lista');
+      return;
+    }
+    const newPlaylist: Playlist = {
+      id: `playlist-${Date.now()}`,
+      name: trimmed,
+      description: description?.trim() || 'Lista personalizada',
+      coverUrl: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=600&auto=format&fit=crop&q=80',
+      createdAt: Date.now(),
+      tracks: []
+    };
+    setPlaylists((prev) => [newPlaylist, ...prev]);
+    setIsNewPlaylistModalOpen(false);
+    setNewPlaylistName('');
+    setNewPlaylistDesc('');
+    showToast(`Playlist "${trimmed}" creada con éxito`);
+  };
+
+  const handleAddTrackToPlaylist = (playlistId: string, track: Track) => {
+    setPlaylists((prev) =>
+      prev.map((pl) => {
+        if (pl.id !== playlistId) return pl;
+        const exists = pl.tracks.some((t) => t.id === track.id || (t.title === track.title && t.artist === track.artist));
+        if (exists) {
+          showToast(`La canción ya estaba en "${pl.name}"`);
+          return pl;
+        }
+        const updatedTracks = [...pl.tracks, track];
+        showToast(`Añadida a "${pl.name}"`);
+        return {
+          ...pl,
+          tracks: updatedTracks,
+          coverUrl: pl.tracks.length === 0 ? track.coverUrl : pl.coverUrl
+        };
+      })
+    );
+    setPlaylistModalTrack(null);
+  };
+
+  const handleRemoveTrackFromPlaylist = (playlistId: string, trackId: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setPlaylists((prev) =>
+      prev.map((pl) => {
+        if (pl.id !== playlistId) return pl;
+        return {
+          ...pl,
+          tracks: pl.tracks.filter((t) => t.id !== trackId)
+        };
+      })
+    );
+    showToast('Canción retirada de la playlist');
+  };
+
+  const handleDeletePlaylist = (playlistId: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setPlaylists((prev) => prev.filter((pl) => pl.id !== playlistId));
+    if (selectedPlaylistId === playlistId) {
+      setSelectedPlaylistId(null);
+    }
+    showToast('Playlist eliminada');
+  };
+
+  const handlePlayPlaylist = (playlist: Playlist, startIndex = 0) => {
+    if (!playlist.tracks || playlist.tracks.length === 0) {
+      showToast('Esta playlist está vacía');
+      return;
+    }
+    setTracks(playlist.tracks);
+    selectTrack(startIndex);
+    showToast(`Reproduciendo playlist: ${playlist.name}`);
+  };
+
+  // ==========================================
+  // SUGERENCIAS DE BÚSQUEDA Y AUTOCOMPLETADO
+  // ==========================================
+  const handleSearchInputChange = (val: string) => {
+    setSearchQuery(val);
+    if (searchDebounceRef.current) {
+      clearTimeout(searchDebounceRef.current);
+    }
+    if (val.trim().length >= 2) {
+      searchDebounceRef.current = setTimeout(async () => {
+        try {
+          const suggestions = await fetchSearchSuggestions(val, fastApiUrl);
+          const localMatches = tracks
+            .filter((t) =>
+              (t.title || '').toLowerCase().includes(val.toLowerCase()) ||
+              (t.artist || '').toLowerCase().includes(val.toLowerCase())
+            )
+            .map((t) => `${t.artist} - ${t.title}`);
+          const combined = Array.from(new Set([...suggestions, ...localMatches])).slice(0, 8);
+          setSearchSuggestions(combined);
+          setIsSuggestionsOpen(combined.length > 0);
+        } catch {
+          setIsSuggestionsOpen(false);
+        }
+      }, 160);
+    } else {
+      setSearchSuggestions([]);
+      setIsSuggestionsOpen(false);
+    }
+  };
+
+  const handleSelectSuggestion = (suggestion: string) => {
+    setSearchQuery(suggestion);
+    setIsSuggestionsOpen(false);
+    executeOnlineSearch(suggestion);
+  };
+
+  // Paginación de resultados de búsqueda (10 por página)
+  const totalSearchPages = Math.ceil(onlineSearchResults.length / SEARCH_PAGE_SIZE) || 1;
+  const paginatedSearchResults = useMemo(() => {
+    const start = (searchCurrentPage - 1) * SEARCH_PAGE_SIZE;
+    return onlineSearchResults.slice(start, start + SEARCH_PAGE_SIZE);
+  }, [onlineSearchResults, searchCurrentPage]);
 
   // ==========================================
   // INICIALIZACIÓN PWA & DETECCIÓN INSTALACIÓN
@@ -452,7 +835,7 @@ export default function App() {
     const { outcome } = await deferredInstallPrompt.userChoice;
     if (outcome === 'accepted') {
       setIsInstalledPwa(true);
-      showToast('¡Diaz Music instalado en tu celular!');
+      showToast('¡Thomas Music instalado en tu celular!');
     }
     setDeferredInstallPrompt(null);
   };
@@ -616,10 +999,16 @@ export default function App() {
   }, [playbackSpeed, activePreset]);
 
   useEffect(() => {
+    const targetVol = isMuted ? 0 : Math.min(1, Math.max(0, volume));
     if (audioRef.current) {
-      audioRef.current.volume = isMuted ? 0 : volume;
+      // El elemento HTMLAudioElement solo acepta rango [0, 1]
+      audioRef.current.volume = targetVol;
+    }
+    if (radioAudioRef.current) {
+      radioAudioRef.current.volume = targetVol;
     }
     if (gainNodeRef.current && audioCtxRef.current) {
+      // Web Audio API GainNode permite amplificación limpia por encima de 100% (hasta 2.0 = 200%)
       gainNodeRef.current.gain.setTargetAtTime(isMuted ? 0 : volume, audioCtxRef.current.currentTime, 0.05);
     }
   }, [volume, isMuted]);
@@ -645,7 +1034,7 @@ export default function App() {
     return () => clearInterval(interval);
   }, [is8DAudio]);
 
-  // Presets Rápidos
+  // Presets Rápidos del Ecualizador
   const applyAudioPreset = (presetName: AudioPreset) => {
     setActivePreset(presetName);
     if (presetName === 'normal') {
@@ -654,6 +1043,41 @@ export default function App() {
       setEqGains([0, 0, 0, 0, 0]);
       setIs8DAudio(false);
       showToast('Estudio Original (Flat EQ 1.0x)');
+    } else if (presetName === 'bassboost') {
+      setPlaybackSpeed(1.0);
+      setLowpassFreq(20000);
+      setEqGains([11, 7, 0, 2, 3]);
+      showToast('🔊 Mega Bass Boost (+11dB en 60Hz - Bajos Potentes)');
+    } else if (presetName === 'subbass') {
+      setPlaybackSpeed(1.0);
+      setLowpassFreq(20000);
+      setEqGains([12, 6, -1, -2, -3]);
+      showToast('🔥 Sub-Bass Profundo (+12dB Subwoofer Activo)');
+    } else if (presetName === 'reggaeton') {
+      setPlaybackSpeed(1.0);
+      setLowpassFreq(20000);
+      setEqGains([9, 5, 2, 4, 3]);
+      showToast('🎵 Preset Reggaeton & Urbano (Bajo marcado + Voces)');
+    } else if (presetName === 'rock') {
+      setPlaybackSpeed(1.0);
+      setLowpassFreq(20000);
+      setEqGains([6, 2, 1, 5, 7]);
+      showToast('🎸 Preset Rock Enérgico (Graves firmes + Agudos)');
+    } else if (presetName === 'pop') {
+      setPlaybackSpeed(1.0);
+      setLowpassFreq(20000);
+      setEqGains([2, 2, 6, 4, 2]);
+      showToast('🎤 Preset Pop & Voces Claras');
+    } else if (presetName === 'electronic') {
+      setPlaybackSpeed(1.0);
+      setLowpassFreq(20000);
+      setEqGains([10, 6, -1, 4, 6]);
+      showToast('⚡ Preset Club & Electrónica (Pegada + Brillo)');
+    } else if (presetName === 'acoustic') {
+      setPlaybackSpeed(1.0);
+      setLowpassFreq(20000);
+      setEqGains([3, 4, 3, 2, 2]);
+      showToast('🎻 Preset Acústico Natural');
     } else if (presetName === 'slowed') {
       setPlaybackSpeed(0.84);
       setLowpassFreq(6500);
@@ -669,13 +1093,40 @@ export default function App() {
       setLowpassFreq(1800);
       setEqGains([-2, 3, 2, -4, -8]);
       showToast('Filtro Vinilo Lo-Fi Radio (Pasa-bajos 1.8kHz)');
-    } else if (presetName === 'bassboost') {
-      setPlaybackSpeed(1.0);
-      setLowpassFreq(20000);
-      setEqGains([10, 7, 0, 2, 3]);
-      showToast('Mega Bass Boost (+10dB en 60Hz)');
     }
   };
+
+  // Mantener la reproducción de radio y música continua en segundo plano y al cambiar de pestaña
+  useEffect(() => {
+    const handleVisibilityResume = () => {
+      if (document.visibilityState === 'visible') {
+        if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+          audioCtxRef.current.resume().catch(console.warn);
+        }
+        if (isPlaying) {
+          if (activeAudioSource === 'radio') {
+            if (radioAudioRef.current && (radioAudioRef.current.paused || radioAudioRef.current.readyState < 2 || radioAudioRef.current.error)) {
+              console.log('Reanudando señal de radio al cambiar o volver de pestaña...');
+              radioAudioRef.current.src = currentRadioStation.audioUrl;
+              radioAudioRef.current.load();
+              radioAudioRef.current.play().catch(console.warn);
+            }
+          } else if (activeAudioSource === 'music') {
+            if (audioRef.current && audioRef.current.paused) {
+              audioRef.current.play().catch(console.warn);
+            }
+          }
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityResume);
+    window.addEventListener('focus', handleVisibilityResume);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityResume);
+      window.removeEventListener('focus', handleVisibilityResume);
+    };
+  }, [isPlaying, activeAudioSource, currentRadioStation]);
 
   // ==========================================
   // MEDIA SESSION & AUDÍFONOS / INTERCOMUNICADOR
@@ -689,34 +1140,47 @@ export default function App() {
   useEffect(() => {
     registerMediaSessionHandlers({
       onPlay: () => {
-        if (audioRef.current) {
-          initWebAudio();
-          if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-            audioCtxRef.current.resume();
+        if (activeAudioSource === 'radio') {
+          if (radioAudioRef.current) {
+            radioAudioRef.current.play().then(() => setIsPlaying(true)).catch(console.warn);
           }
-          audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {
-            setUseSynthFallback(true);
-            setIsPlaying(true);
-          });
+        } else {
+          if (audioRef.current) {
+            initWebAudio();
+            if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+              audioCtxRef.current.resume();
+            }
+            audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {
+              setUseSynthFallback(true);
+              setIsPlaying(true);
+            });
+          }
         }
       },
       onPause: () => {
-        if (audioRef.current) {
-          audioRef.current.pause();
-          setIsPlaying(false);
+        if (activeAudioSource === 'radio') {
+          if (radioAudioRef.current) {
+            radioAudioRef.current.pause();
+            setIsPlaying(false);
+          }
+        } else {
+          if (audioRef.current) {
+            audioRef.current.pause();
+            setIsPlaying(false);
+          }
         }
       },
       onNext: () => handleNextTrack(),
       onPrev: () => handlePrevTrack(),
       onSeek: (targetTime) => {
-        if (audioRef.current) {
+        if (activeAudioSource === 'music' && audioRef.current) {
           audioRef.current.currentTime = targetTime;
           setCurrentTime(targetTime);
           updateMediaSessionPosition(targetTime, duration, playbackSpeed);
         }
       },
       onSeekRelative: (offset) => {
-        if (audioRef.current) {
+        if (activeAudioSource === 'music' && audioRef.current) {
           const newTime = Math.max(0, Math.min(duration, audioRef.current.currentTime + offset));
           audioRef.current.currentTime = newTime;
           setCurrentTime(newTime);
@@ -725,7 +1189,7 @@ export default function App() {
         }
       }
     });
-  }, [currentTrackIndex, tracks, duration, playbackSpeed]);
+  }, [currentTrackIndex, tracks, duration, playbackSpeed, activeAudioSource]);
 
   const toggleWakeLock = async () => {
     if (isWakeLockActive) {
@@ -779,9 +1243,25 @@ export default function App() {
       }
 
       const primaryColor =
-        themeAccent === 'emerald' ? '#10b981' : themeAccent === 'cyberpunk' ? '#f43f5e' : '#8b5cf6';
+        themeAccent === 'emerald'
+          ? '#10b981'
+          : themeAccent === 'blue'
+          ? '#3b82f6'
+          : themeAccent === 'pink'
+          ? '#ec4899'
+          : themeAccent === 'cyberpunk'
+          ? '#f43f5e'
+          : '#8b5cf6';
       const secondaryColor =
-        themeAccent === 'emerald' ? '#06b6d4' : themeAccent === 'cyberpunk' ? '#eab308' : '#ec4899';
+        themeAccent === 'emerald'
+          ? '#06b6d4'
+          : themeAccent === 'blue'
+          ? '#38bdf8'
+          : themeAccent === 'pink'
+          ? '#f43f5e'
+          : themeAccent === 'cyberpunk'
+          ? '#eab308'
+          : '#ec4899';
 
       if (visualizerMode === 'bars') {
         const barWidth = (width / bufferLength) * 0.75;
@@ -858,6 +1338,27 @@ export default function App() {
   // CONTROL DE REPRODUCCIÓN & LOOP A-B
   // ==========================================
   const togglePlay = () => {
+    if (activeAudioSource === 'radio') {
+      if (!radioAudioRef.current) return;
+      if (isPlaying) {
+        radioAudioRef.current.pause();
+        setIsPlaying(false);
+      } else {
+        if (!radioAudioRef.current.src || radioAudioRef.current.src === '' || radioAudioRef.current.ended) {
+          radioAudioRef.current.src = currentRadioStation.audioUrl;
+          radioAudioRef.current.load();
+        }
+        radioAudioRef.current.play().then(() => {
+          setIsPlaying(true);
+        }).catch((err) => {
+          console.warn('Reintentando radio play:', err);
+          radioAudioRef.current?.load();
+          radioAudioRef.current?.play().then(() => setIsPlaying(true)).catch(console.warn);
+        });
+      }
+      return;
+    }
+
     initWebAudio();
     if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
       audioCtxRef.current.resume();
@@ -891,6 +1392,11 @@ export default function App() {
     setCurrentTime(0);
     setLoopA(null);
     setLoopB(null);
+
+    // Pausar reproductor de radio si estaba activo
+    if (radioAudioRef.current) {
+      radioAudioRef.current.pause();
+    }
 
     setTracks((prev) => {
       const idx = prev.findIndex((t) => t.id === track.id);
@@ -949,6 +1455,14 @@ export default function App() {
       audioRef.current.currentTime = loopA;
       showToast(`Loop A-B activo (${formatTime(loopA)} → ${formatTime(loopB)})`);
     }
+
+    // Algoritmo Inteligente Spotify: Al superar el 50% de la canción se guarda en favoritas y perfil de gustos
+    if (activeAudioSource === 'music' && duration > 15 && now / duration >= 0.5) {
+      if (!listened50TrackIdsRef.current.has(currentMusicTrack.id)) {
+        listened50TrackIdsRef.current.add(currentMusicTrack.id);
+        registerTrack50PercentListened(currentMusicTrack);
+      }
+    }
   };
 
   // Algoritmo de Afinidad Musical
@@ -965,15 +1479,33 @@ export default function App() {
   };
 
   const handleNextTrack = () => {
+    if (activeAudioSource === 'radio') {
+      const currentIdx = radioStations.findIndex((s) => s.id === currentRadioStation.id);
+      const nextIdx = (currentIdx + 1) % radioStations.length;
+      playRadioStation(radioStations[nextIdx]);
+      return;
+    }
+
     if (autoRadioEnabled && tracks.length > 1) {
       const candidates = tracks
-        .map((t, idx) => ({ idx, score: calculateAffinityScore(t) }))
+        .map((t, idx) => {
+          let score = calculateAffinityScore(t);
+          // Bono significativo por artista escuchado > 50%
+          if (userTasteProfile.favoriteArtists[t.artist]) {
+            score += Math.min(35, userTasteProfile.favoriteArtists[t.artist] * 12);
+          }
+          // Bono por género escuchado > 50%
+          if (userTasteProfile.favoriteGenres[t.genre]) {
+            score += Math.min(20, userTasteProfile.favoriteGenres[t.genre] * 6);
+          }
+          return { idx, score };
+        })
         .filter((item) => item.idx !== currentTrackIndex)
         .sort((a, b) => b.score - a.score);
 
       const bestMatch = candidates[0];
       if (bestMatch) {
-        showToast(`Radio IA encoló: ${tracks[bestMatch.idx].title} (${bestMatch.score}% Match)`);
+        showToast(`✨ Reproducción automática: ${tracks[bestMatch.idx].title} (${tracks[bestMatch.idx].artist})`);
         selectTrack(bestMatch.idx);
         return;
       }
@@ -983,6 +1515,13 @@ export default function App() {
   };
 
   const handlePrevTrack = () => {
+    if (activeAudioSource === 'radio') {
+      const currentIdx = radioStations.findIndex((s) => s.id === currentRadioStation.id);
+      const prevIdx = (currentIdx - 1 + radioStations.length) % radioStations.length;
+      playRadioStation(radioStations[prevIdx]);
+      return;
+    }
+
     const prevIdx = (currentTrackIndex - 1 + tracks.length) % tracks.length;
     selectTrack(prevIdx);
   };
@@ -1062,7 +1601,7 @@ export default function App() {
         lyrics: [
           { time: 0, text: `♪ Archivo local: ${file.name} ♪` },
           { time: 8, text: "Reproducción directa con motor DSP de 5 bandas" },
-          { time: 25, text: "100% libre de DRM • Almacenado en tu dispositivo" }
+          { time: 25, text: "Audio de alta fidelidad • Almacenado en tu dispositivo" }
         ]
       };
     });
@@ -1080,6 +1619,8 @@ export default function App() {
     if (!query || query.trim().length < 2) return;
     setActiveTab('search');
     setIsSearchingOnline(true);
+    setSearchCurrentPage(1);
+    setIsSuggestionsOpen(false);
     try {
       const results = await searchFreeMusicOnline(query, fastApiUrl);
       setOnlineSearchResults(results);
@@ -1087,7 +1628,7 @@ export default function App() {
         if (serverStatus !== 'connected' && results.some((r) => r.sourceType === 'invidious')) {
           setServerStatus('connected');
         }
-        showToast(`Encontradas ${results.length} canciones en vivo`);
+        showToast(`Encontradas ${results.length} canciones para "${query}"`);
       } else {
         showToast('No se encontraron resultados online para esa búsqueda');
       }
@@ -1184,7 +1725,7 @@ export default function App() {
       };
       setTracks((prev) => [demoServerTrack, ...prev]);
       setServerStatus('connected');
-      showToast('Nodo FastAPI vinculado a Diaz Music (Pista agregada)');
+      showToast('Nodo FastAPI vinculado a Thomas Music (Pista agregada)');
     }
   };
 
@@ -1226,52 +1767,127 @@ export default function App() {
       .sort((a, b) => (activeTab === 'ai-radio' ? b.affinity - a.affinity : 0));
   }, [tracks, activeTab, searchQuery, algoEnergyTarget, algoAcousticTarget, algoBpmTarget]);
 
+  // Paginación limpia de 10 canciones para Inicio & Tendencias
+  const homeTotalPages = Math.ceil(filteredTracks.length / HOME_PAGE_SIZE) || 1;
+  const paginatedHomeTracks = useMemo(() => {
+    const start = (homeCurrentPage - 1) * HOME_PAGE_SIZE;
+    return filteredTracks.slice(start, start + HOME_PAGE_SIZE);
+  }, [filteredTracks, homeCurrentPage, HOME_PAGE_SIZE]);
+
+  useEffect(() => {
+    setHomeCurrentPage(1);
+  }, [searchQuery, activeTab]);
+
   const accentClasses = {
     emerald: {
-      bg: 'bg-gradient-to-r from-emerald-500 to-cyan-500',
-      hover: 'hover:from-emerald-400 hover:to-cyan-400',
+      bg: 'bg-gradient-to-r from-emerald-500 to-teal-500',
+      hover: 'hover:from-emerald-400 hover:to-teal-400',
       text: 'text-emerald-400',
       border: 'border-emerald-500/40',
-      glow: 'shadow-emerald-500/25'
+      glow: 'shadow-emerald-500/25',
+      ring: 'ring-emerald-400',
+      accent: 'accent-emerald-500'
     },
-    cyberpunk: {
-      bg: 'bg-gradient-to-r from-rose-500 to-amber-500',
-      hover: 'hover:from-rose-400 hover:to-amber-400',
-      text: 'text-rose-400',
-      border: 'border-rose-500/40',
-      glow: 'shadow-rose-500/25'
+    blue: {
+      bg: 'bg-gradient-to-r from-blue-500 to-cyan-500',
+      hover: 'hover:from-blue-400 hover:to-cyan-400',
+      text: 'text-blue-400',
+      border: 'border-blue-500/40',
+      glow: 'shadow-blue-500/25',
+      ring: 'ring-blue-400',
+      accent: 'accent-blue-500'
+    },
+    pink: {
+      bg: 'bg-gradient-to-r from-pink-500 to-rose-400',
+      hover: 'hover:from-pink-400 hover:to-rose-300',
+      text: 'text-pink-400',
+      border: 'border-pink-500/40',
+      glow: 'shadow-pink-500/25',
+      ring: 'ring-pink-400',
+      accent: 'accent-pink-500'
     },
     violet: {
       bg: 'bg-gradient-to-r from-violet-500 to-fuchsia-500',
       hover: 'hover:from-violet-400 hover:to-fuchsia-400',
       text: 'text-violet-400',
       border: 'border-violet-500/40',
-      glow: 'shadow-violet-500/25'
+      glow: 'shadow-violet-500/25',
+      ring: 'ring-violet-400',
+      accent: 'accent-violet-500'
+    },
+    cyberpunk: {
+      bg: 'bg-gradient-to-r from-rose-500 to-amber-500',
+      hover: 'hover:from-rose-400 hover:to-amber-400',
+      text: 'text-rose-400',
+      border: 'border-rose-500/40',
+      glow: 'shadow-rose-500/25',
+      ring: 'ring-rose-400',
+      accent: 'accent-rose-500'
     }
   }[themeAccent];
 
   return (
     <div className="min-h-screen bg-[#0b0d10] text-zinc-100 flex flex-col font-sans select-none overflow-x-hidden">
-      {/* ELEMENTO AUDIO OCULTO */}
+      {/* REPRODUCTOR DEDICADO DE PISTAS DE MÚSICA (SOPORTE COMPLETO DSP, ECUALIZADOR Y 8D) */}
       <audio
         ref={audioRef}
-        src={currentTrack.audioUrl}
+        src={activeAudioSource === 'music' ? currentMusicTrack.audioUrl : undefined}
         crossOrigin="anonymous"
         onTimeUpdate={handleTimeUpdate}
         onLoadedMetadata={(e) => {
           if (activeAudioSource === 'music') {
-            setDuration((e.target as HTMLAudioElement).duration || currentTrack.duration);
-          } else {
-            setDuration(0);
+            setDuration((e.target as HTMLAudioElement).duration || currentMusicTrack.duration);
           }
         }}
         onError={(e) => {
           const err = (e.target as HTMLAudioElement).error;
-          console.warn('Audio error:', err?.code, err?.message);
+          console.warn('Music stream event:', err?.code, err?.message);
         }}
         onEnded={() => {
           if (activeAudioSource === 'music') {
             handleNextTrack();
+          }
+        }}
+      />
+
+      {/* REPRODUCTOR DEDICADO DE RADIO EN VIVO (SIN RESTRICCIONES CORS, CONEXIÓN RESILIENTE 24/7) */}
+      <audio
+        ref={radioAudioRef}
+        src={activeAudioSource === 'radio' ? currentRadioStation.audioUrl : undefined}
+        onLoadedMetadata={() => setDuration(0)}
+        onError={(e) => {
+          const err = (e.target as HTMLAudioElement).error;
+          console.warn('Radio stream error/reconnect:', err?.code, err?.message);
+          if (activeAudioSource === 'radio' && isPlaying) {
+            setTimeout(() => {
+              if (radioAudioRef.current && activeAudioSource === 'radio' && isPlaying) {
+                console.log('Reconectando señal en vivo de radio tras fallo...');
+                radioAudioRef.current.src = currentRadioStation.audioUrl;
+                radioAudioRef.current.load();
+                radioAudioRef.current.play().catch(console.warn);
+              }
+            }, 600);
+          }
+        }}
+        onStalled={() => {
+          if (activeAudioSource === 'radio' && isPlaying) {
+            setTimeout(() => {
+              if (radioAudioRef.current && activeAudioSource === 'radio' && isPlaying && (radioAudioRef.current.paused || radioAudioRef.current.readyState < 2)) {
+                console.log('Señal de radio estancada, recargando stream...');
+                radioAudioRef.current.src = currentRadioStation.audioUrl;
+                radioAudioRef.current.load();
+                radioAudioRef.current.play().catch(console.warn);
+              }
+            }, 1800);
+          }
+        }}
+        onEnded={() => {
+          if (activeAudioSource === 'radio' && isPlaying) {
+            if (radioAudioRef.current) {
+              radioAudioRef.current.src = currentRadioStation.audioUrl;
+              radioAudioRef.current.load();
+              radioAudioRef.current.play().catch(console.warn);
+            }
           }
         }}
       />
@@ -1284,12 +1900,12 @@ export default function App() {
         </div>
       )}
 
-      {/* BANNER INSTALACIÓN PWA (EN MÓVIL Y DESKTOP SI NO ESTÁ INSTALADO) */}
+      {/* BANNER INSTALACIÓN (EN MÓVIL Y DESKTOP SI NO ESTÁ INSTALADO) */}
       {!isInstalledPwa && deferredInstallPrompt && (
         <div className="bg-gradient-to-r from-emerald-950 via-zinc-900 to-cyan-950 border-b border-emerald-500/40 px-4 py-2 flex items-center justify-between text-xs">
           <div className="flex items-center gap-2">
             <Smartphone className="w-4 h-4 text-emerald-400 animate-pulse" />
-            <span>Instala <strong>Diaz Music</strong> en tu celular como aplicación nativa (PWA)</span>
+            <span>Instala <strong>Thomas Music</strong> en tu celular para escuchar rápido y sin interrupciones</span>
           </div>
           <button
             onClick={installPwaApp}
@@ -1303,53 +1919,96 @@ export default function App() {
       {/* BARRA SUPERIOR (HEADER) */}
       <header className="h-16 border-b border-zinc-800/80 bg-[#0b0d10]/95 backdrop-blur-xl px-4 lg:px-6 flex items-center justify-between sticky top-0 z-30">
         <div className="flex items-center gap-3">
-          <div className={`relative w-10 h-10 rounded-xl ${accentClasses.bg} flex items-center justify-center shadow-lg ${accentClasses.glow}`}>
-            <Disc className="w-6 h-6 text-black animate-spin" style={{ animationDuration: isPlaying ? '4s' : '0s' }} />
-            <span className="absolute -bottom-1 -right-1 bg-[#0b0d10] text-emerald-400 text-[9px] font-black px-1 rounded border border-emerald-500/50">
-              DM
+          <div className={`relative w-11 h-11 rounded-2xl ${accentClasses.bg} p-1 flex items-center justify-center shadow-lg ${accentClasses.glow} shrink-0`}>
+            <BabyHeadphonesIcon className="w-full h-full" />
+            <span className={`absolute -bottom-1 -right-1 bg-[#0b0d10] ${accentClasses.text} text-[9px] font-black px-1 rounded border ${accentClasses.border}`}>
+              TM
             </span>
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h1 className="font-black text-lg tracking-tight bg-gradient-to-r from-white via-emerald-200 to-cyan-300 bg-clip-text text-transparent">
-                Diaz Music
+              <h1 className="font-black text-xl tracking-tight text-white">
+                Thomas Music
               </h1>
-              <span className="text-[10px] uppercase font-extrabold px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-300">
-                PWA Studio
+              <span className="hidden sm:inline-block text-[10px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400">
+                PRO
               </span>
             </div>
             <p className="text-xs text-zinc-400 hidden sm:block">
-              Clon Libre • Control Audífonos & Intercomunicador • REA Bridge
+              Tu música favorita sin anuncios • Calidad de estudio
             </p>
           </div>
         </div>
 
-        {/* BUSCADOR CENTRAL */}
-        <div className="flex-1 max-w-md mx-4">
+        {/* BUSCADOR CENTRAL CON AUTOCOMPLETADO EN TIEMPO REAL */}
+        <div className="flex-1 max-w-md mx-4 relative">
           <div className="relative">
             <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => handleSearchInputChange(e.target.value)}
+              onFocus={() => {
+                if (searchSuggestions.length > 0) setIsSuggestionsOpen(true);
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
+                  setIsSuggestionsOpen(false);
                   executeOnlineSearch(searchQuery);
                 }
               }}
-              placeholder="Buscar canción, artista o presiona Enter para buscar online gratis..."
-              className="w-full bg-zinc-900/90 border border-zinc-800 focus:border-emerald-500/60 rounded-full pl-10 pr-4 py-1.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none transition"
+              placeholder="Buscar canción, artista (ej: Karol G, Feid, Lo-Fi)..."
+              className="w-full bg-zinc-900/90 border border-zinc-800 focus:border-emerald-500/60 rounded-full pl-10 pr-9 py-1.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none transition shadow-inner"
             />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchQuery('');
+                  setSearchSuggestions([]);
+                  setIsSuggestionsOpen(false);
+                }}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
+
+          {/* DESPLEGABLE DE SUGERENCIAS EN TIEMPO REAL */}
+          {isSuggestionsOpen && searchSuggestions.length > 0 && (
+            <div className="absolute top-full left-0 right-0 mt-1.5 bg-[#11131C] border border-zinc-700/80 rounded-2xl shadow-2xl overflow-hidden z-50 py-1.5 backdrop-blur-xl">
+              <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400 flex items-center justify-between border-b border-zinc-800/80">
+                <span className={`flex items-center gap-1.5 ${accentClasses.text}`}>
+                  <Sparkles className="w-3 h-3" />
+                  Sugerencias Rápidas
+                </span>
+                <span className="text-[9px] text-zinc-500">Toca para buscar</span>
+              </div>
+              <div className="max-h-56 overflow-y-auto">
+                {searchSuggestions.map((sug, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => handleSelectSuggestion(sug)}
+                    className="w-full text-left px-3.5 py-2 text-xs text-zinc-200 hover:bg-zinc-800/80 hover:text-emerald-300 flex items-center gap-2.5 transition"
+                  >
+                    <Search className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                    <span className="truncate">{sug}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ACCIONES RÁPIDAS SUPERIORES */}
-        <div className="flex items-center gap-2">
-          {/* Botón Modo Intercom / Pantalla Despierta */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+          {/* Botón Modo Intercom / Pantalla Despierta (visible en tablet/desktop) */}
           <button
             onClick={toggleWakeLock}
             title={isWakeLockActive ? 'Modo Intercomunicador Activo' : 'Activar Modo Intercomunicador en Moto'}
-            className={`p-2 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition ${
+            className={`hidden sm:flex p-2 rounded-xl border text-xs font-semibold items-center gap-1.5 transition ${
               isWakeLockActive
                 ? 'bg-amber-500/20 border-amber-400 text-amber-300'
                 : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white'
@@ -1361,44 +2020,184 @@ export default function App() {
             </span>
           </button>
 
-          {/* Subir MP3 Local */}
-          <label className="cursor-pointer bg-zinc-800/90 hover:bg-zinc-700 border border-zinc-700 text-xs font-medium px-3 py-2 rounded-xl flex items-center gap-2 transition">
-            <Upload className="w-3.5 h-3.5 text-emerald-400" />
-            <span className="hidden sm:inline">Subir MP3 / FLAC</span>
+          {/* Subir MP3 Local (visible en tablet/desktop) */}
+          <label className="hidden md:flex cursor-pointer bg-zinc-800/90 hover:bg-zinc-700 border border-zinc-700 text-xs font-medium px-3 py-2 rounded-xl items-center gap-2 transition">
+            <Upload className={`w-3.5 h-3.5 ${accentClasses.text}`} />
+            <span>Subir MP3</span>
             <input type="file" accept="audio/*" multiple onChange={handleLocalFileUpload} className="hidden" />
           </label>
 
-          {/* Selector de tema */}
-          <div className="hidden sm:flex items-center bg-zinc-900 border border-zinc-800 rounded-full p-1 gap-1">
-            {(['emerald', 'cyberpunk', 'violet'] as ThemeAccent[]).map((t) => (
+          {/* Selector de tema en Desktop (5 esferas inline) */}
+          <div className="hidden md:flex items-center bg-zinc-900 border border-zinc-800 rounded-full p-1 gap-1.5 shadow-inner">
+            {THEMES_LIST.map((t) => (
               <button
-                key={t}
-                onClick={() => setThemeAccent(t)}
-                title={`Tema ${t}`}
-                className={`w-4 h-4 rounded-full transition transform ${
-                  themeAccent === t ? 'scale-110 ring-2 ring-white' : 'opacity-50 hover:opacity-90'
-                } ${t === 'emerald' ? 'bg-emerald-500' : t === 'cyberpunk' ? 'bg-rose-500' : 'bg-violet-500'}`}
+                key={t.id}
+                onClick={() => {
+                  setThemeAccent(t.id as ThemeAccent);
+                  showToast(`Tema ${t.label} activado`);
+                }}
+                title={`Tema ${t.label}`}
+                className={`w-4 h-4 rounded-full transition-all transform ${
+                  themeAccent === t.id
+                    ? 'scale-125 ring-2 ring-white shadow-md'
+                    : 'opacity-40 hover:opacity-100 hover:scale-110'
+                } ${t.color}`}
               />
             ))}
+          </div>
+
+          {/* Selector de tema en Celular (Botón con Popover elegante que muestra los 5 temas completos) */}
+          <div className="relative md:hidden">
+            <button
+              onClick={() => setIsThemeModalOpen(!isThemeModalOpen)}
+              className="p-2 rounded-xl bg-zinc-900 border border-zinc-700/80 text-zinc-300 hover:text-white flex items-center gap-1.5 shadow"
+              title="Cambiar Color de Tema"
+            >
+              <Palette className="w-4 h-4" />
+              <span className={`w-2.5 h-2.5 rounded-full ${
+                THEMES_LIST.find((t) => t.id === themeAccent)?.color || 'bg-emerald-500'
+              }`} />
+            </button>
+
+            {isThemeModalOpen && (
+              <div className="absolute right-0 top-full mt-2 w-52 bg-[#121522] border border-zinc-700 rounded-2xl p-2 shadow-2xl z-50 space-y-1 backdrop-blur-xl animate-in fade-in zoom-in-95 duration-150">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400 px-2.5 py-1 border-b border-zinc-800">
+                  Colores de Tema
+                </p>
+                {THEMES_LIST.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => {
+                      setThemeAccent(t.id as ThemeAccent);
+                      setIsThemeModalOpen(false);
+                      showToast(`Tema ${t.label} activado`);
+                    }}
+                    className={`w-full flex items-center justify-between px-2.5 py-2 rounded-xl text-xs transition ${
+                      themeAccent === t.id
+                        ? 'bg-zinc-800 text-white font-bold ring-1 ring-white/20'
+                        : 'text-zinc-300 hover:bg-zinc-800/60'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <span className={`w-3.5 h-3.5 rounded-full shadow ${t.color}`} />
+                      <span>{t.label}</span>
+                    </div>
+                    {themeAccent === t.id && <Check className="w-3.5 h-3.5 text-emerald-400" />}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Menú de Usuario / Perfil */}
+          <div className="relative">
+            {currentUser ? (
+              <button
+                onClick={() => setIsUserMenuOpen(!isUserMenuOpen)}
+                className="flex items-center gap-2 pl-1.5 pr-2.5 py-1 rounded-full border border-zinc-700/80 bg-zinc-900/90 hover:bg-zinc-800 transition"
+                title={`Conectado como ${currentUser.displayName}`}
+              >
+                <div className="w-6 h-6 rounded-full bg-gradient-to-tr from-emerald-500 to-cyan-500 text-black font-extrabold text-xs flex items-center justify-center shadow">
+                  {currentUser.displayName ? currentUser.displayName.charAt(0).toUpperCase() : 'U'}
+                </div>
+                <span className="text-xs font-bold text-zinc-200 max-w-[90px] truncate hidden sm:inline">
+                  {currentUser.displayName}
+                </span>
+                <ChevronDown className="w-3.5 h-3.5 text-zinc-400" />
+              </button>
+            ) : (
+              <button
+                onClick={() => {
+                  setAuthMode('login');
+                  setIsAuthModalOpen(true);
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-emerald-500/40 bg-emerald-950/60 hover:bg-emerald-900/80 text-emerald-300 text-xs font-bold transition shadow-md"
+              >
+                <User className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Iniciar Sesión</span>
+              </button>
+            )}
+
+            {/* Dropdown del menú de usuario */}
+            {isUserMenuOpen && currentUser && (
+              <div className="absolute right-0 mt-2 w-52 bg-[#121522] border border-zinc-700 rounded-2xl shadow-2xl p-2 z-50 backdrop-blur-xl space-y-1">
+                <div className="px-3 py-2 border-b border-zinc-800 text-xs">
+                  <p className="font-bold text-white truncate">{currentUser.displayName}</p>
+                  <p className="text-[10px] text-zinc-400 font-mono">@{currentUser.username}</p>
+                </div>
+                <button
+                  onClick={() => {
+                    setIsUserMenuOpen(false);
+                    setAuthMode('login');
+                    setIsAuthModalOpen(true);
+                  }}
+                  className="w-full text-left px-3 py-2 text-xs text-zinc-200 hover:bg-zinc-800 rounded-xl flex items-center gap-2 transition"
+                >
+                  <UserPlus className="w-3.5 h-3.5 text-cyan-400" /> Cambiar de Cuenta
+                </button>
+                <button
+                  onClick={handleLogout}
+                  className="w-full text-left px-3 py-2 text-xs text-rose-400 hover:bg-rose-950/40 rounded-xl flex items-center gap-2 transition"
+                >
+                  <LogOut className="w-3.5 h-3.5" /> Cerrar Sesión
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </header>
 
-      {/* CONTENIDO PRINCIPAL */}
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 p-4 lg:p-6 pb-44 max-w-[1600px] w-full mx-auto">
+      {/* CONTENIDO PRINCIPAL: Layout inteligente y ultra-responsivo */}
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 p-3 sm:p-4 lg:px-6 lg:pt-6 pb-56 lg:pb-64 max-w-[1600px] w-full mx-auto">
         
-        {/* COLUMNA IZQUIERDA (NAVEGACIÓN + ALGORITMO SPOTIFY PRO) */}
-        <aside className="lg:col-span-3 space-y-4">
-          <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-3 space-y-1">
+        {/* COLUMNA LATERAL (En celular pasa a la parte inferior con order-2 y oculta menús redundantes) */}
+        <aside className="order-2 lg:order-1 lg:col-span-3 space-y-4">
+          {/* TARJETA DE PERFIL ACTIVO EN SIDEBAR (Solo en desktop; en móvil ya está en la barra superior) */}
+          <div className="hidden lg:flex bg-[#11131C] border border-zinc-800/80 rounded-2xl p-3 items-center justify-between">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className={`w-8 h-8 rounded-xl ${accentClasses.bg} text-black font-black text-xs flex items-center justify-center shrink-0 shadow`}>
+                {currentUser ? currentUser.displayName.charAt(0).toUpperCase() : '👤'}
+              </div>
+              <div className="min-w-0">
+                <p className="text-xs font-bold text-white truncate">
+                  {currentUser ? currentUser.displayName : 'Invitado'}
+                </p>
+                <p className="text-[10px] text-zinc-400 truncate">
+                  {currentUser ? `@${currentUser.username}` : 'Inicia sesión'}
+                </p>
+              </div>
+            </div>
+            {!currentUser ? (
+              <button
+                onClick={() => {
+                  setAuthMode('login');
+                  setIsAuthModalOpen(true);
+                }}
+                className={`text-[11px] px-2.5 py-1 rounded-lg ${accentClasses.bg} text-black font-extrabold transition shrink-0`}
+              >
+                Entrar
+              </button>
+            ) : (
+              <button
+                onClick={handleLogout}
+                title="Cerrar Sesión"
+                className="p-1.5 text-zinc-500 hover:text-rose-400 transition"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {/* Menú de navegación vertical: visible SOLAMENTE en Desktop (en celular ya está la barra fija abajo) */}
+          <div className="hidden lg:block bg-[#11131C] border border-zinc-800/80 rounded-2xl p-3 space-y-1">
             {[
-              { id: 'home', label: 'Catálogo & Tendencias', icon: ListMusic, badge: tracks.length },
+              { id: 'home', label: 'Inicio & Tendencias', icon: ListMusic },
+              { id: 'search', label: 'Buscar Música', icon: Search },
+              { id: 'playlists', label: 'Tus Playlists', icon: FolderPlus, badge: playlists.length },
+              { id: 'favorites', label: 'Favoritas & +50%', icon: Heart, badge: favorites50List.length },
               { id: 'radio', label: 'Radio en Vivo (FM/AM)', icon: Radio, badge: '🔴 LIVE' },
-              { id: 'jamendo', label: 'Jamendo Oficial (Full)', icon: Disc, badge: '600k' },
-              { id: 'search', label: 'Búsqueda Libre Online', icon: Globe, badge: 'Universal' },
-              { id: 'vault', label: 'Bóveda Offline (Sin DRM)', icon: ShieldCheck, badge: tracks.filter((t) => t.cachedOffline).length },
-              { id: 'dsp-studio', label: 'Estudio DSP & 5-Band EQ', icon: Sliders, badge: '8D Audio' },
-              { id: 'rea-guide', label: 'Puente REA Spotify', icon: Link2, badge: 'morluto' },
-              { id: 'server', label: 'Servidor FastAPI / NAS', icon: Server, badge: serverStatus === 'connected' ? 'ON' : 'Sync' }
+              { id: 'dsp-studio', label: 'Ecualizador DSP & Boost', icon: Sliders, badge: `${Math.round(volume * 100)}%` },
+              { id: 'vault', label: 'Bóveda Offline', icon: ShieldCheck, badge: tracks.filter((t) => t.cachedOffline).length }
             ].map((item) => {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
@@ -1416,13 +2215,15 @@ export default function App() {
                     <Icon className="w-4 h-4" />
                     <span>{item.label}</span>
                   </div>
-                  <span
-                    className={`text-[11px] px-2 py-0.5 rounded-full ${
-                      isActive ? 'bg-black/20 text-black font-bold' : 'bg-zinc-800 text-zinc-400'
-                    }`}
-                  >
-                    {item.badge}
-                  </span>
+                  {item.badge !== undefined && (
+                    <span
+                      className={`text-[11px] px-2 py-0.5 rounded-full ${
+                        isActive ? 'bg-black/20 text-black font-bold' : 'bg-zinc-800 text-zinc-400'
+                      }`}
+                    >
+                      {item.badge}
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -1452,7 +2253,13 @@ export default function App() {
                   return (
                     <button
                       key={st.id}
-                      onClick={() => playRadioStation(st)}
+                      onClick={() => {
+                        if (activeAudioSource === 'radio' && currentRadioStation.id === st.id) {
+                          togglePlay();
+                        } else {
+                          playRadioStation(st);
+                        }
+                      }}
                       className={`w-full flex items-center justify-between p-2.5 rounded-xl text-xs transition ${
                         isCurrent
                           ? 'bg-red-500/20 border border-red-500/50 text-red-300 font-bold shadow-sm'
@@ -1478,9 +2285,12 @@ export default function App() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Compass className={`w-4 h-4 ${accentClasses.text}`} />
-                  <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-                    Algoritmo Diaz IA
-                  </h2>
+                  <div>
+                    <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
+                      Algoritmo Thomas IA
+                    </h2>
+                    <span className="text-[10px] text-zinc-500 block">Auto-DJ inteligente para tus canciones</span>
+                  </div>
                 </div>
                 <button
                   onClick={() => setAutoRadioEnabled(!autoRadioEnabled)}
@@ -1490,11 +2300,11 @@ export default function App() {
                       : 'bg-zinc-800 border-zinc-700 text-zinc-400'
                   }`}
                 >
-                  {autoRadioEnabled ? 'Auto-Radio IA ON' : 'Manual'}
+                  {autoRadioEnabled ? 'Auto-DJ IA ON' : 'Manual'}
                 </button>
               </div>
               <p className="text-xs text-zinc-400 leading-relaxed">
-                Tú controlas qué música te recomienda tu plataforma:
+                El motor inteligente que elige la siguiente canción automáticamente según el ritmo, BPM y tus artistas preferidos para que la música nunca se detenga:
               </p>
 
               <div className="space-y-3 pt-1">
@@ -1565,25 +2375,31 @@ export default function App() {
               </div>
             </div>
           )}
+          {/* Espaciador inferior sidebar */}
+          <div className="h-28 sm:h-36 w-full shrink-0 pointer-events-none" aria-hidden="true" />
         </aside>
 
-        {/* COLUMNA CENTRAL (HERO PLAYER + VISUALIZADOR + TABS) */}
-        <main className="lg:col-span-6 space-y-4">
-          {/* TARJETA HERO DE MÚSICA (SOLO VISIBLE EN PESTAÑAS DE MÚSICA) */}
+        {/* COLUMNA CENTRAL (En celular se muestra PRIMERO con order-1 para ver las canciones de inmediato) */}
+        <main className="order-1 lg:order-2 lg:col-span-6 space-y-4">
+          {/* TARJETA HERO DINÁMICA (MÚSICA O RADIO EN VIVO) CON ANIMACIÓN FFT DE AUDIO */}
           {activeTab !== 'radio' && (
             <div className="relative rounded-2xl overflow-hidden border border-zinc-800/90 bg-gradient-to-br from-[#151928] via-[#10121A] to-[#0B0C12] p-5 shadow-xl">
               <div className="flex flex-col sm:flex-row items-center gap-5 z-10 relative">
                 <div className="relative group shrink-0">
                   <img
-                    src={currentMusicTrack.coverUrl}
-                    alt={currentMusicTrack.title}
+                    src={currentTrack.coverUrl}
+                    alt={currentTrack.title}
                     className="w-28 h-28 sm:w-32 sm:h-32 rounded-2xl object-cover shadow-2xl border border-white/10"
                   />
                   <button
                     onClick={togglePlay}
-                    className={`absolute inset-0 m-auto w-12 h-12 rounded-full ${accentClasses.bg} text-black flex items-center justify-center shadow-lg opacity-95 group-hover:scale-105 transition`}
+                    className={`absolute inset-0 m-auto w-12 h-12 rounded-full ${
+                      activeAudioSource === 'radio'
+                        ? 'bg-red-500 hover:bg-red-400 text-white'
+                        : `${accentClasses.bg} text-black`
+                    } flex items-center justify-center shadow-lg opacity-95 group-hover:scale-105 transition`}
                   >
-                    {isPlaying && activeAudioSource === 'music' ? (
+                    {isPlaying ? (
                       <Pause className="w-6 h-6 fill-current" />
                     ) : (
                       <Play className="w-6 h-6 fill-current ml-0.5" />
@@ -1593,48 +2409,71 @@ export default function App() {
 
                 <div className="flex-1 text-center sm:text-left min-w-0">
                   <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2 mb-1.5">
-                    <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-zinc-800/90 ${accentClasses.text}`}>
-                      {calculateAffinityScore(currentMusicTrack)}% Afinidad IA
-                    </span>
-                    <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-zinc-800/80 text-zinc-300">
-                      {Math.round(currentMusicTrack.bpm * playbackSpeed)} BPM • {currentMusicTrack.keySignature}
-                    </span>
-                    {currentMusicTrack.cachedOffline && (
-                      <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-950/90 border border-emerald-500/40 text-emerald-300 flex items-center gap-1">
-                        <CheckCircle2 className="w-3 h-3" /> Offline Vault
-                      </span>
+                    {activeAudioSource === 'radio' ? (
+                      <>
+                        <span className="text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-red-500/20 border border-red-500/40 text-red-400 flex items-center gap-1.5">
+                          <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
+                          RADIO EN VIVO 24/7
+                        </span>
+                        <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-zinc-800/90 text-zinc-300">
+                          FM Digital HQ • Sin Cortes
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-zinc-800/90 ${accentClasses.text}`}>
+                          {calculateAffinityScore(currentMusicTrack)}% Afinidad IA
+                        </span>
+                        <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-zinc-800/80 text-zinc-300">
+                          {Math.round(currentMusicTrack.bpm * playbackSpeed)} BPM • {currentMusicTrack.keySignature}
+                        </span>
+                        {currentMusicTrack.cachedOffline && (
+                          <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-950/90 border border-emerald-500/40 text-emerald-300 flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3" /> Offline Vault
+                          </span>
+                        )}
+                      </>
                     )}
                   </div>
 
                   <h2 className="text-xl sm:text-2xl font-extrabold text-white truncate">
-                    {currentMusicTrack.title}
+                    {currentTrack.title}
                   </h2>
                   <p className="text-sm text-zinc-400 truncate">
-                    {currentMusicTrack.artist} — <span className="text-zinc-500">{currentMusicTrack.album}</span>
+                    {currentTrack.artist} — <span className="text-zinc-500">{currentTrack.album}</span>
                   </p>
 
-                  {/* Presets Rápidos de DJ */}
-                  <div className="flex flex-wrap items-center justify-center sm:justify-start gap-1.5 mt-3">
-                    {[
-                      { id: 'normal', label: 'Normal (1.0x)' },
-                      { id: 'slowed', label: 'Slowed + Reverb' },
-                      { id: 'nightcore', label: 'Nightcore (1.25x)' },
-                      { id: 'lofi', label: 'Lo-Fi (1.8kHz)' },
-                      { id: 'bassboost', label: 'Mega Bass (+10dB)' }
-                    ].map((preset) => (
-                      <button
-                        key={preset.id}
-                        onClick={() => applyAudioPreset(preset.id as AudioPreset)}
-                        className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition ${
-                          activePreset === preset.id
-                            ? `${accentClasses.bg} text-black font-bold`
-                            : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300'
-                        }`}
-                      >
-                        {preset.label}
-                      </button>
-                    ))}
-                  </div>
+                  {/* Presets Rápidos de DJ (si suena música) o Género (si suena radio) */}
+                  {activeAudioSource === 'music' ? (
+                    <div className="flex flex-wrap items-center justify-center sm:justify-start gap-1.5 mt-3">
+                      {[
+                        { id: 'normal', label: 'Normal (1.0x)' },
+                        { id: 'slowed', label: 'Slowed + Reverb' },
+                        { id: 'nightcore', label: 'Nightcore (1.25x)' },
+                        { id: 'lofi', label: 'Lo-Fi (1.8kHz)' },
+                        { id: 'bassboost', label: 'Mega Bass (+10dB)' }
+                      ].map((preset) => (
+                        <button
+                          key={preset.id}
+                          onClick={() => applyAudioPreset(preset.id as AudioPreset)}
+                          className={`text-[11px] px-2.5 py-1 rounded-lg font-medium transition ${
+                            activePreset === preset.id
+                              ? `${accentClasses.bg} text-black font-bold`
+                              : 'bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300'
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-center sm:justify-start gap-3 mt-3 text-xs text-zinc-400">
+                      <span className="flex items-center gap-1.5 text-red-400 font-medium">
+                        <Activity className="w-3.5 h-3.5 animate-pulse" /> Sintonizado en Directo
+                      </span>
+                      <span>{currentRadioStation.genre}</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1813,7 +2652,13 @@ export default function App() {
                     return (
                       <div
                         key={station.id}
-                        onClick={() => playRadioStation(station)}
+                        onClick={() => {
+                          if (activeAudioSource === 'radio' && currentRadioStation.id === station.id) {
+                            togglePlay();
+                          } else {
+                            playRadioStation(station);
+                          }
+                        }}
                         className={`group relative overflow-hidden rounded-2xl border p-4 cursor-pointer transition-all duration-300 ${
                           isStationPlaying
                             ? 'bg-gradient-to-br from-red-950/70 via-zinc-900 to-zinc-950 border-red-500/60 shadow-xl shadow-red-950/40 ring-1 ring-red-500/40'
@@ -1991,7 +2836,13 @@ export default function App() {
                       return (
                         <div
                           key={station.id}
-                          onClick={() => playRadioStation(station)}
+                          onClick={() => {
+                            if (activeAudioSource === 'radio' && currentRadioStation.id === station.id) {
+                              togglePlay();
+                            } else {
+                              playRadioStation(station);
+                            }
+                          }}
                           className={`group flex items-center justify-between p-3 rounded-2xl border transition cursor-pointer ${
                             isCurrent
                               ? 'bg-red-950/40 border-red-500/60 shadow-md ring-1 ring-red-500/30'
@@ -2124,7 +2975,7 @@ export default function App() {
 
               {/* Explicación de Arquitectura REA */}
               <div className="bg-zinc-900/50 border border-zinc-800/80 rounded-xl p-4 text-xs space-y-2 text-zinc-300">
-                <p className="font-bold text-white">¿Cómo funciona REA (Reverse Engineer Anything) en Diaz Music?</p>
+                <p className="font-bold text-white">¿Cómo funciona REA (Reverse Engineer Anything) en Thomas Music?</p>
                 <ul className="list-disc pl-5 space-y-1 text-zinc-400">
                   <li><strong>REA MCP Bridge:</strong> Conecta herramientas de análisis (JADX para APKs móviles de Android, interceptores de API de Electron y tráfico web).</li>
                   <li><strong>Decodificación de Enlaces:</strong> Traduce IDs propietarios de Spotify a flujos de audio abiertos (Audius, SoundHelix o tu servidor FastAPI con yt-dlp).</li>
@@ -2133,299 +2984,685 @@ export default function App() {
               </div>
             </div>
           ) : activeTab === 'search' ? (
-            /* BÚSQUEDA LIBRE ONLINE (UNIVERSAL STREAMING) */
-            <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 space-y-4">
+            /* ========================================== */
+            /* PESTAÑA: BÚSQUEDA INTELIGENTE ONLINE CON SUGERENCIAS */
+            /* ========================================== */
+            <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 sm:p-5 space-y-4">
               <div className="flex items-center justify-between">
                 <div>
-                  <h3 className="text-base font-bold text-white flex items-center gap-2">
-                    <Globe className="w-4 h-4 text-emerald-400" />
-                    Buscador Universal en Streaming (Cualquier Canción del Mundo)
+                  <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
+                    <Search className={`w-4 h-4 ${accentClasses.text}`} />
+                    Buscar Música
                   </h3>
-                  <p className="text-xs text-zinc-400">
-                    Transmite en vivo cualquier artista o álbum sin registrarte ni descargar.
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    Encuentra cualquier canción, álbum o artista para reproducir al instante.
                   </p>
                 </div>
               </div>
 
-              {/* Indicador de Modo de Streaming (Completo vs Previo) */}
-              {serverStatus === 'connected' ? (
-                <div className="bg-emerald-950/60 border border-emerald-500/40 rounded-xl p-3 flex items-center gap-3">
-                  <div className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
-                  <div className="text-xs">
-                    <p className="font-bold text-emerald-300">Modo Full-Stream Activo (Canciones 100% Completas)</p>
-                    <p className="text-zinc-400 text-[11px]">Cualquier búsqueda en internet se transmite completa (3 a 5+ min) sin límite de 30 segundos.</p>
-                  </div>
-                </div>
-              ) : (
-                <div className="bg-amber-950/40 border border-amber-500/30 rounded-xl p-3 flex items-center justify-between gap-3">
-                  <div className="flex items-start gap-2.5 text-xs">
-                    <AlertCircle className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
-                    <div>
-                      <p className="font-bold text-amber-300">Modo Previo Activo (Audio de 30s)</p>
-                      <p className="text-zinc-400 text-[11px] mt-0.5">
-                        Para escuchar las canciones <strong>100% COMPLETAS (3 a 5 min)</strong>, inicia en tu PC:
-                        <code className="text-amber-300 bg-black/40 px-1.5 py-0.5 rounded ml-1 font-mono">python server.py</code>
-                      </p>
-                    </div>
+              {/* BARRA DE BÚSQUEDA CON AUTOCOMPLETADO */}
+              <div className="relative">
+                <div className="flex gap-2">
+                  <div className="relative flex-1">
+                    <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => handleSearchInputChange(e.target.value)}
+                      onFocus={() => {
+                        if (searchSuggestions.length > 0) setIsSuggestionsOpen(true);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          setIsSuggestionsOpen(false);
+                          executeOnlineSearch(searchQuery);
+                        }
+                      }}
+                      placeholder="Escribe un artista o canción (ej: Karol G, Provenza, Feid, Lo-Fi)..."
+                      className="w-full bg-zinc-900 border border-zinc-800 rounded-xl pl-10 pr-9 py-2.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500 transition shadow-inner"
+                    />
+                    {searchQuery && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSearchQuery('');
+                          setSearchSuggestions([]);
+                          setIsSuggestionsOpen(false);
+                        }}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
                   <button
-                    onClick={connectFastApiServer}
-                    className="bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[11px] font-bold px-2.5 py-1.5 rounded-lg shrink-0 transition"
+                    onClick={() => {
+                      setIsSuggestionsOpen(false);
+                      executeOnlineSearch(searchQuery);
+                    }}
+                    disabled={isSearchingOnline}
+                    className={`${accentClasses.bg} text-black font-extrabold text-sm px-5 py-2.5 rounded-xl flex items-center gap-2 transition hover:opacity-95 shrink-0 shadow-lg`}
                   >
-                    Conectar Servidor
+                    {isSearchingOnline ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                    <span>Buscar</span>
                   </button>
                 </div>
-              )}
 
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && executeOnlineSearch(searchQuery)}
-                  placeholder="Ej: Deadmau5, Lo-Fi, Synthwave, Hip-Hop..."
-                  className="flex-1 bg-zinc-900 border border-zinc-800 rounded-xl px-3.5 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
-                />
-                <button
-                  onClick={() => executeOnlineSearch(searchQuery)}
-                  disabled={isSearchingOnline}
-                  className={`${accentClasses.bg} text-black font-bold text-sm px-4 py-2 rounded-xl flex items-center gap-2`}
-                >
-                  {isSearchingOnline ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-                  Buscar Online
-                </button>
+                {/* DESPLEGABLE FLOTANTE DE SUGERENCIAS */}
+                {isSuggestionsOpen && searchSuggestions.length > 0 && (
+                  <div className="absolute top-full left-0 right-0 mt-2 bg-[#121522] border border-zinc-700/80 rounded-2xl shadow-2xl overflow-hidden z-50 py-2 backdrop-blur-xl">
+                    <div className="px-3.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400 flex items-center justify-between border-b border-zinc-800/80">
+                      <span className={`flex items-center gap-1.5 ${accentClasses.text}`}>
+                        <Sparkles className="w-3.5 h-3.5" />
+                        Sugerencias Inteligentes
+                      </span>
+                      <span className="text-[9px] text-zinc-500">Toca para buscar directo</span>
+                    </div>
+                    <div className="max-h-60 overflow-y-auto">
+                      {searchSuggestions.map((sug, idx) => (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => handleSelectSuggestion(sug)}
+                          className="w-full text-left px-4 py-2.5 text-xs text-zinc-200 hover:bg-zinc-800/80 hover:text-emerald-300 flex items-center gap-3 transition"
+                        >
+                          <Search className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
+                          <span className="truncate font-medium">{sug}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
+              {/* LISTA DE RESULTADOS PAGINADA (MÁXIMO 10 POR PÁGINA Y SCROLL CONTROLADO) */}
               {onlineSearchResults.length > 0 ? (
-                <div className="space-y-1.5">
-                  {onlineSearchResults.map((track) => (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between text-xs text-zinc-400 px-1">
+                    <span>
+                      Mostrando {paginatedSearchResults.length} de {onlineSearchResults.length} canciones encontradas
+                    </span>
+                    <span className="font-mono text-zinc-300">
+                      Página {searchCurrentPage} de {totalSearchPages}
+                    </span>
+                  </div>
+
+                  {/* CONTENEDOR CON SCROLL DELIMITADO PARA EVITAR DESCUADRES */}
+                  <div className="max-h-[520px] overflow-y-auto pr-1 space-y-2 rounded-xl pb-4">
+                    {paginatedSearchResults.map((track) => (
+                      <div
+                        key={track.id}
+                        onClick={() => playSong(track)}
+                        className="group flex items-center justify-between p-2.5 rounded-xl border border-transparent hover:border-zinc-700 bg-zinc-900/50 hover:bg-zinc-800/60 cursor-pointer transition"
+                      >
+                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                          <div className="relative w-12 h-12 rounded-xl overflow-hidden shrink-0 border border-zinc-800">
+                            <img
+                              src={track.coverUrl}
+                              alt={track.title}
+                              className="w-full h-full object-cover"
+                            />
+                            {currentTrack.id === track.id && isPlaying && (
+                              <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+                                <div className="flex items-end gap-0.5 h-4">
+                                  <span className={`w-1 bg-current rounded-full animate-bounce ${accentClasses.text}`} style={{ animationDuration: '0.5s' }} />
+                                  <span className={`w-1 bg-current rounded-full animate-bounce ${accentClasses.text}`} style={{ animationDuration: '0.35s', animationDelay: '0.15s' }} />
+                                  <span className={`w-1 bg-current rounded-full animate-bounce ${accentClasses.text}`} style={{ animationDuration: '0.65s', animationDelay: '0.3s' }} />
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className={`text-sm font-bold truncate transition ${
+                              currentTrack.id === track.id ? accentClasses.text : 'text-white group-hover:text-zinc-200'
+                            }`}>
+                              {track.title}
+                            </p>
+                            <p className="text-xs text-zinc-400 truncate">
+                              {track.artist} {track.genre ? `• ${track.genre}` : ''}
+                            </p>
+                            <span className="text-[10px] text-zinc-500 font-mono">
+                              {formatTime(track.duration)}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* ACCIONES DE LA FILA */}
+                        <div className="flex items-center gap-1.5 ml-2" onClick={(e) => e.stopPropagation()}>
+                          {/* Añadir a Playlist */}
+                          <button
+                            onClick={() => setPlaylistModalTrack(track)}
+                            title="Añadir a Playlist"
+                            className="p-2 rounded-xl border border-zinc-800 hover:border-cyan-500 text-zinc-400 hover:text-cyan-300 transition"
+                          >
+                            <ListPlus className="w-4 h-4" />
+                          </button>
+
+                          {/* Descargar a Bóveda Offline */}
+                          <button
+                            onClick={() => {
+                              setTracks((prev) => [track, ...prev]);
+                              toggleOfflineVault(track.id);
+                            }}
+                            className="p-2 rounded-xl border border-zinc-800 hover:border-emerald-500 text-zinc-400 hover:text-emerald-400 transition"
+                            title="Descargar para escuchar sin internet"
+                          >
+                            <Download className="w-4 h-4" />
+                          </button>
+
+                          {/* Reproducir */}
+                          <button
+                            onClick={() => playSong(track)}
+                            className={`p-2 rounded-xl bg-zinc-800 group-hover:${accentClasses.bg} text-zinc-300 group-hover:text-black transition`}
+                            title="Reproducir ahora"
+                          >
+                            <Play className="w-4 h-4 fill-current ml-0.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* BARRA DE PAGINACIÓN */}
+                  {onlineSearchResults.length > SEARCH_PAGE_SIZE && (
+                    <div className="flex items-center justify-between pt-3 border-t border-zinc-800 text-xs text-zinc-400">
+                      <span>
+                        Página {searchCurrentPage} de {totalSearchPages} (10 canciones por página)
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => setSearchCurrentPage((p) => Math.max(1, p - 1))}
+                          disabled={searchCurrentPage === 1}
+                          className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 disabled:hover:bg-zinc-800 text-zinc-200 font-semibold transition flex items-center gap-1"
+                        >
+                          <ChevronLeft className="w-4 h-4" /> Anterior
+                        </button>
+                        <span className={`font-mono px-2.5 py-1 rounded bg-zinc-900 border border-zinc-800 ${accentClasses.text} font-bold`}>
+                          {searchCurrentPage}
+                        </span>
+                        <button
+                          onClick={() => setSearchCurrentPage((p) => Math.min(totalSearchPages, p + 1))}
+                          disabled={searchCurrentPage === totalSearchPages}
+                          className="px-3 py-1.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-30 disabled:hover:bg-zinc-800 text-zinc-200 font-semibold transition flex items-center gap-1"
+                        >
+                          Siguiente <ChevronRight className="w-4 h-4" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="py-8 space-y-6">
+                  <div className="text-center space-y-2">
+                    <Search className={`w-10 h-10 mx-auto ${accentClasses.text} opacity-60 mb-1`} />
+                    <p className="text-sm font-semibold text-white">¿Qué quieres escuchar hoy?</p>
+                    <p className="text-xs text-zinc-400 max-w-sm mx-auto">
+                      Escribe las primeras letras de un artista o canción (ej: "Kar") para ver sugerencias automáticas al instante.
+                    </p>
+                  </div>
+
+                  {/* Píldoras de búsqueda rápida de artistas y géneros populares */}
+                  <div className="pt-2">
+                    <p className="text-xs font-bold text-zinc-400 mb-2.5 px-1 uppercase tracking-wider">
+                      Búsquedas Populares
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {[
+                        'Karol G',
+                        'Feid',
+                        'Bad Bunny',
+                        'Blessd',
+                        'Ryan Castro',
+                        'Quevedo',
+                        'Coldplay',
+                        'Shakira',
+                        'Reggaeton 2026',
+                        'Electrónica',
+                        'Lo-Fi Chill',
+                        'Salsa Baúl'
+                      ].map((item) => (
+                        <button
+                          key={item}
+                          onClick={() => {
+                            setSearchQuery(item);
+                            executeOnlineSearch(item);
+                          }}
+                          className="px-3.5 py-1.5 rounded-full bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-xs text-zinc-300 hover:text-white transition flex items-center gap-1.5"
+                        >
+                          <Search className="w-3 h-3 text-zinc-500" />
+                          {item}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : activeTab === 'playlists' ? (
+            /* ========================================== */
+            /* PESTAÑA: TUS PLAYLISTS & BIBLIOTECA */
+            /* ========================================== */
+            <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-5 space-y-5">
+              {selectedPlaylistId ? (
+                /* VISTA DETALLE DE PLAYLIST SELECCIONADA */
+                (() => {
+                  const currentPl = playlists.find((p) => p.id === selectedPlaylistId);
+                  if (!currentPl) {
+                    setSelectedPlaylistId(null);
+                    return null;
+                  }
+                  return (
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+                        <button
+                          onClick={() => setSelectedPlaylistId(null)}
+                          className="text-xs text-zinc-400 hover:text-white flex items-center gap-1.5 transition"
+                        >
+                          <ChevronLeft className="w-4 h-4" /> Volver a mis playlists
+                        </button>
+                        <button
+                          onClick={(e) => handleDeletePlaylist(currentPl.id, e)}
+                          className="text-xs text-rose-400 hover:text-rose-300 flex items-center gap-1 transition"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" /> Eliminar Playlist
+                        </button>
+                      </div>
+
+                      <div className="flex flex-col sm:flex-row items-center gap-5">
+                        <img
+                          src={currentPl.coverUrl || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=600'}
+                          alt={currentPl.name}
+                          className="w-32 h-32 rounded-2xl object-cover shadow-xl border border-zinc-800 shrink-0"
+                        />
+                        <div className="text-center sm:text-left min-w-0 flex-1">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">
+                            Playlist Personalizada
+                          </span>
+                          <h2 className="text-2xl font-black text-white truncate">{currentPl.name}</h2>
+                          <p className="text-xs text-zinc-400 mt-1">{currentPl.description}</p>
+                          <p className="text-[11px] text-zinc-500 font-mono mt-1">
+                            {currentPl.tracks.length} canciones • Guardada en tu dispositivo
+                          </p>
+                          <div className="flex items-center justify-center sm:justify-start gap-2.5 pt-3">
+                            <button
+                              onClick={() => handlePlayPlaylist(currentPl, 0)}
+                              disabled={currentPl.tracks.length === 0}
+                              className={`${accentClasses.bg} text-black font-extrabold text-xs px-5 py-2.5 rounded-xl flex items-center gap-2 shadow-lg disabled:opacity-40 transition`}
+                            >
+                              <Play className="w-4 h-4 fill-current ml-0.5" />
+                              Reproducir Todo
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Lista de Canciones en la Playlist */}
+                      <div className="space-y-1.5 pt-3">
+                        {currentPl.tracks.length > 0 ? (
+                          currentPl.tracks.map((track, idx) => (
+                            <div
+                              key={track.id}
+                              onClick={() => handlePlayPlaylist(currentPl, idx)}
+                              className="group flex items-center justify-between p-2.5 rounded-xl border border-transparent hover:border-zinc-700 bg-zinc-900/50 hover:bg-zinc-800/60 cursor-pointer transition"
+                            >
+                              <div className="flex items-center gap-3 min-w-0 flex-1">
+                                <span className="w-5 text-center text-xs font-mono text-zinc-500 group-hover:text-emerald-400">
+                                  {idx + 1}
+                                </span>
+                                <img
+                                  src={track.coverUrl}
+                                  alt={track.title}
+                                  className="w-10 h-10 rounded-xl object-cover shrink-0 border border-zinc-800"
+                                />
+                                <div className="min-w-0 flex-1">
+                                  <p className="text-xs font-bold text-white truncate">{track.title}</p>
+                                  <p className="text-[11px] text-zinc-400 truncate">{track.artist}</p>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                                <span className="text-[11px] text-zinc-500 font-mono hidden sm:inline">
+                                  {formatTime(track.duration)}
+                                </span>
+                                <button
+                                  onClick={(e) => handleRemoveTrackFromPlaylist(currentPl.id, track.id, e)}
+                                  className="p-1.5 text-zinc-500 hover:text-rose-400 transition"
+                                  title="Quitar de la playlist"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                                <Play className="w-4 h-4 text-zinc-400 group-hover:text-emerald-400" />
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="text-center py-10 text-zinc-500 text-xs">
+                            Esta playlist está vacía. Busca cualquier canción y pulsa el botón "+" para añadirla aquí.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()
+              ) : (
+                /* GRID DE TODAS LAS PLAYLISTS */
+                <div>
+                  <div className="flex items-center justify-between pb-3 mb-4 border-b border-zinc-800">
+                    <div>
+                      <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                        <FolderPlus className={`w-5 h-5 ${accentClasses.text}`} />
+                        Tus Playlists & Listas de Reproducción
+                      </h3>
+                      <p className="text-xs text-zinc-400 mt-0.5">
+                        Crea y organiza tus mezclas favoritas para la ruta, el gimnasio o tus viajes.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setIsNewPlaylistModalOpen(true)}
+                      className={`${accentClasses.bg} text-black font-extrabold text-xs px-4 py-2 rounded-xl flex items-center gap-1.5 transition shadow-lg`}
+                    >
+                      <Plus className="w-4 h-4" />
+                      Nueva Playlist
+                    </button>
+                  </div>
+
+                  {playlists.length > 0 ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
+                      {playlists.map((pl) => (
+                        <div
+                          key={pl.id}
+                          onClick={() => setSelectedPlaylistId(pl.id)}
+                          className="group bg-zinc-900/60 hover:bg-zinc-800/80 border border-zinc-800/80 hover:border-emerald-500/50 rounded-2xl p-3.5 cursor-pointer transition flex flex-col justify-between"
+                        >
+                          <div className="flex items-center gap-3">
+                            <img
+                              src={pl.coverUrl || 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=600'}
+                              alt={pl.name}
+                              className="w-16 h-16 rounded-xl object-cover border border-zinc-800 shrink-0"
+                            />
+                            <div className="min-w-0 flex-1">
+                              <h4 className="text-sm font-bold text-white truncate group-hover:text-emerald-300 transition">
+                                {pl.name}
+                              </h4>
+                              <p className="text-[11px] text-zinc-400 truncate mt-0.5">{pl.description}</p>
+                              <span className="text-[10px] text-zinc-500 font-mono block mt-1">
+                                {pl.tracks.length} canciones
+                              </span>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center justify-between pt-3 mt-3 border-t border-zinc-800/60">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handlePlayPlaylist(pl, 0);
+                              }}
+                              disabled={pl.tracks.length === 0}
+                              className="text-xs text-emerald-400 hover:text-emerald-300 font-bold flex items-center gap-1 disabled:opacity-40"
+                            >
+                              <Play className="w-3.5 h-3.5 fill-current" /> Reproducir
+                            </button>
+                            <button
+                              onClick={(e) => handleDeletePlaylist(pl.id, e)}
+                              className="text-zinc-500 hover:text-rose-400 p-1"
+                              title="Eliminar Playlist"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="text-center py-12 text-zinc-500 text-xs">
+                      No tienes ninguna playlist creada aún. Toca en "+ Nueva Playlist" para comenzar tu primera lista.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : activeTab === 'favorites' ? (
+            /* ========================================== */
+            /* PESTAÑA: FAVORITAS & ESCUCHADAS (+50%) */
+            /* ========================================== */
+            <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-5 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-zinc-800">
+                <div>
+                  <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                    <Heart className="w-5 h-5 text-rose-500 fill-current" />
+                    Tus Favoritas & Escuchadas (+50%)
+                  </h3>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    Canciones que marcaste con me gusta o que escuchaste más del 50%. El algoritmo las usa para tus recomendaciones automáticas continuas estilo Spotify.
+                  </p>
+                </div>
+                {favorites50List.length > 0 && (
+                  <button
+                    onClick={() => {
+                      setTracks(favorites50List);
+                      selectTrack(0);
+                      showToast('Reproduciendo tu Mix de Favoritas y +50%');
+                    }}
+                    className={`${accentClasses.bg} text-black font-extrabold text-xs px-4 py-2 rounded-xl flex items-center gap-2 shadow-lg transition`}
+                  >
+                    <Play className="w-4 h-4 fill-current ml-0.5" />
+                    Reproducir Mix ({favorites50List.length})
+                  </button>
+                )}
+              </div>
+
+              {favorites50List.length > 0 ? (
+                <div className="space-y-2 max-h-[520px] overflow-y-auto pr-1">
+                  {favorites50List.map((track, idx) => (
                     <div
                       key={track.id}
                       onClick={() => playSong(track)}
                       className="group flex items-center justify-between p-2.5 rounded-xl border border-transparent hover:border-zinc-700 bg-zinc-900/50 hover:bg-zinc-800/60 cursor-pointer transition"
                     >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <img src={track.coverUrl} alt={track.title} className="w-12 h-12 rounded-xl object-cover shrink-0" />
-                        <div className="min-w-0">
+                      <div className="flex items-center gap-3.5 min-w-0 flex-1">
+                        <span className="w-4 text-center text-xs font-mono text-zinc-500 group-hover:text-rose-400">
+                          {idx + 1}
+                        </span>
+                        <img
+                          src={track.coverUrl}
+                          alt={track.title}
+                          className="w-11 h-11 rounded-xl object-cover shrink-0 border border-zinc-800"
+                        />
+                        <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
-                            <p className="text-sm font-bold text-white truncate">{track.title}</p>
-                            {track.sourceType === 'jamendo' && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-semibold">
-                                Jamendo Full
-                              </span>
-                            )}
+                            <p className="text-xs font-bold text-white truncate group-hover:text-rose-300 transition">
+                              {track.title}
+                            </p>
+                            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-rose-950/80 border border-rose-500/30 text-rose-300 font-semibold shrink-0">
+                              +50% Escuchado
+                            </span>
                           </div>
-                          <p className="text-xs text-zinc-400 truncate">{track.artist} • {track.genre}</p>
+                          <p className="text-[11px] text-zinc-400 truncate">{track.artist} • {track.genre}</p>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2">
+
+                      <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                        {/* Añadir a Playlist */}
                         <button
-                          onClick={(e) => {
-                            e.stopPropagation();
+                          onClick={() => setPlaylistModalTrack(track)}
+                          className="p-1.5 text-zinc-400 hover:text-white"
+                          title="Añadir a playlist"
+                        >
+                          <ListPlus className="w-4 h-4" />
+                        </button>
+
+                        {/* Guardar en Bóveda Offline */}
+                        <button
+                          onClick={() => {
                             setTracks((prev) => [track, ...prev]);
                             toggleOfflineVault(track.id);
                           }}
-                          className="p-2 rounded-xl border border-zinc-800 hover:border-emerald-500 text-zinc-400 hover:text-emerald-400 transition"
-                          title="Descargar a Bóveda Offline"
+                          className="p-1.5 text-zinc-400 hover:text-emerald-400"
+                          title="Descargar offline"
                         >
                           <Download className="w-4 h-4" />
                         </button>
-                        <Play className="w-5 h-5 text-zinc-400 group-hover:text-emerald-400" />
+
+                        <Play className="w-4 h-4 text-zinc-400 group-hover:text-rose-400" />
                       </div>
                     </div>
                   ))}
                 </div>
               ) : (
-                <div className="text-center py-8 text-zinc-500 text-xs">
-                  Escribe un artista o género y presiona "Buscar Online" para explorar millones de pistas libres.
-                </div>
-              )}
-            </div>
-          ) : activeTab === 'jamendo' ? (
-            /* PESTAÑA OFICIAL JAMENDO MUSIC (600,000+ CANCIONES COMPLETAS) */
-            <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-5 space-y-4">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-base font-bold text-white flex items-center gap-2">
-                    <Radio className="w-5 h-5 text-cyan-400" />
-                    Jamendo Music Oficial (600,000+ Canciones Completas)
-                  </h3>
-                  <p className="text-xs text-zinc-400 mt-0.5">
-                    Música bajo licencias Creative Commons. Streaming 100% libre sin cortes ni límite de 30 segundos.
+                <div className="text-center py-12 text-zinc-500 text-xs space-y-2">
+                  <Heart className="w-8 h-8 mx-auto text-zinc-600 mb-2 opacity-50" />
+                  <p className="font-semibold text-zinc-400">Aún no hay canciones en tu historial de favoritos.</p>
+                  <p className="text-[11px] text-zinc-500">
+                    A medida que escuches cualquier canción más del 50%, se guardará automáticamente aquí y el algoritmo la aprenderá para tus recomendaciones.
                   </p>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-[11px] px-2.5 py-1 rounded-full bg-cyan-950/80 border border-cyan-500/40 text-cyan-300 font-mono flex items-center gap-1.5">
-                    <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
-                    API v3.0 Conectada
-                  </span>
-                </div>
-              </div>
-
-              {/* Formulario Configuración Clave Client ID Jamendo */}
-              <div className="bg-zinc-900/90 border border-zinc-800 rounded-xl p-3.5 space-y-2">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-bold text-zinc-300 flex items-center gap-1.5">
-                    <Lock className="w-3.5 h-3.5 text-cyan-400" />
-                    Tu Clave Client ID de Jamendo:
-                  </label>
-                  <a
-                    href="https://developer.jamendo.com/v3.0"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-[11px] text-cyan-400 hover:underline flex items-center gap-1"
-                  >
-                    developer.jamendo.com <ExternalLink className="w-3 h-3" />
-                  </a>
-                </div>
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <input
-                    type="text"
-                    value={jamendoInputKey}
-                    onChange={(e) => setJamendoInputKey(e.target.value)}
-                    placeholder="Pega tu clave Client ID aquí..."
-                    className="flex-1 bg-zinc-950 border border-zinc-800 focus:border-cyan-500 rounded-xl px-3.5 py-2 text-xs font-mono text-zinc-100 placeholder-zinc-500 focus:outline-none"
-                  />
-                  <button
-                    onClick={() => handleSaveJamendoKey(jamendoInputKey)}
-                    className="bg-cyan-500 hover:bg-cyan-400 text-black font-extrabold text-xs px-4 py-2 rounded-xl transition flex items-center justify-center gap-1.5 shrink-0"
-                  >
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    Guardar y Activar Clave
-                  </button>
-                </div>
-                <p className="text-[10px] text-zinc-400">
-                  Tu clave personal se guarda en tu dispositivo. Disfruta de descargas directas en MP3 a máxima velocidad y streaming sin restricciones.
-                </p>
-              </div>
-
-              {/* Filtro por Géneros de Jamendo */}
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-                {JAMENDO_GENRES.map((g) => (
-                  <button
-                    key={g.id}
-                    onClick={() => setSelectedJamendoGenre(g.id)}
-                    className={`text-xs px-3 py-1.5 rounded-xl font-medium whitespace-nowrap transition ${
-                      selectedJamendoGenre === g.id
-                        ? 'bg-cyan-500 text-black font-bold shadow-md'
-                        : 'bg-zinc-900/80 hover:bg-zinc-800 text-zinc-400 hover:text-white border border-zinc-800'
-                    }`}
-                  >
-                    {g.label}
-                  </button>
-                ))}
-              </div>
-
-              {/* Lista de Canciones de Jamendo */}
-              {isLoadingJamendo ? (
-                <div className="flex items-center justify-center py-12 gap-2 text-zinc-400 text-xs">
-                  <RefreshCw className="w-4 h-4 animate-spin text-cyan-400" />
-                  <span>Cargando canciones completas desde Jamendo API...</span>
-                </div>
-              ) : jamendoTracks.length > 0 ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                  {jamendoTracks.map((track) => (
-                    <div
-                      key={track.id}
-                      onClick={() => playSong(track)}
-                      className="group flex items-center justify-between p-2.5 rounded-xl border border-zinc-800/80 hover:border-cyan-500/50 bg-zinc-900/60 hover:bg-zinc-800/70 cursor-pointer transition"
-                    >
-                      <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <div className="relative w-12 h-12 rounded-xl overflow-hidden shrink-0">
-                          <img src={track.coverUrl} alt={track.title} className="w-full h-full object-cover" />
-                          <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition">
-                            <Play className="w-5 h-5 text-white fill-current" />
-                          </div>
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-bold text-white truncate group-hover:text-cyan-300 transition">
-                            {track.title}
-                          </p>
-                          <p className="text-[11px] text-zinc-400 truncate">{track.artist}</p>
-                          <span className="text-[10px] text-zinc-500 font-mono">
-                            {formatTime(track.duration)} • {track.genre}
-                          </span>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center gap-1.5 ml-2">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setTracks((prev) => [track, ...prev]);
-                            toggleOfflineVault(track.id);
-                          }}
-                          className="p-1.5 rounded-lg border border-zinc-800 hover:border-cyan-500 text-zinc-400 hover:text-cyan-300 transition"
-                          title="Guardar canción completa en Bóveda Offline"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggleLike(track.id);
-                          }}
-                          className="p-1.5 text-zinc-500 hover:text-rose-500 transition"
-                        >
-                          <Heart className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-center py-12 text-zinc-500 text-xs">
-                  No se encontraron canciones para este género. Verifica tu Client ID o selecciona otro género.
                 </div>
               )}
             </div>
           ) : activeTab === 'dsp-studio' ? (
-            /* ESTUDIO DSP & ECUALIZADOR */
+            /* ========================================== */
+            /* PESTAÑA: ESTUDIO DSP, ECUALIZADOR & BOOST DE VOLUMEN */
+            /* ========================================== */
             <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-5 space-y-5">
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="text-lg font-bold flex items-center gap-2">
                     <Sliders className={`w-5 h-5 ${accentClasses.text}`} />
-                    Estudio de Masterización DSP & EQ en Tiempo Real
+                    Ecualizador Paramétrico DSP & Super Boost de Volumen
                   </h3>
                   <p className="text-xs text-zinc-400">
-                    Modifica frecuencias, velocidad de cinta, filtro pasa-bajos y audio espacial 8D para audífonos e intercomunicadores.
+                    Ajuste fino de graves potentes, presets DJ y ganancia de volumen por encima del 100% para audífonos e intercomunicador.
                   </p>
                 </div>
                 <button
                   onClick={() => applyAudioPreset('normal')}
-                  className="text-xs bg-zinc-800 hover:bg-zinc-700 px-3 py-1.5 rounded-lg text-zinc-300"
+                  className="text-xs bg-zinc-800 hover:bg-zinc-700 px-3 py-1.5 rounded-lg text-zinc-300 transition"
                 >
-                  Resetear
+                  Resetear EQ
                 </button>
               </div>
 
-              {/* Sliders EQ 5 Bandas */}
-              <div className="grid grid-cols-5 gap-3 bg-zinc-900/70 border border-zinc-800/80 rounded-xl p-4">
-                {EQ_BANDS.map((band, idx) => (
-                  <div key={band.freq} className="flex flex-col items-center space-y-2">
-                    <span className="text-xs font-mono font-bold text-emerald-400">
-                      {eqGains[idx] > 0 ? `+${eqGains[idx]}` : eqGains[idx]} dB
-                    </span>
-                    <input
-                      type="range"
-                      min="-12"
-                      max="12"
-                      step="1"
-                      value={eqGains[idx]}
-                      onChange={(e) => {
-                        const next = [...eqGains];
-                        next[idx] = Number(e.target.value);
-                        setEqGains(next);
-                      }}
-                      className="w-full accent-emerald-500 cursor-pointer"
-                    />
-                    <span className="text-[11px] text-zinc-400 text-center font-medium">{band.label}</span>
-                  </div>
-                ))}
+              {/* SECCIÓN PRESETS DE ECUALIZACIÓN (INCLUIDO BAJOS POTENTES) */}
+              <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-3.5 space-y-2">
+                <span className="text-xs font-bold text-zinc-300 block">
+                  Presets Rápidos de Ecualización & Bajos:
+                </span>
+                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
+                  {[
+                    { id: 'normal', label: 'Plano (Original)', badge: 'Flat' },
+                    { id: 'bassboost', label: 'Mega Bass', badge: '+11dB Bajos' },
+                    { id: 'subbass', label: 'Sub-Bass Profundo', badge: 'Subwoofer' },
+                    { id: 'reggaeton', label: 'Reggaeton / Urbano', badge: 'Punch + Voz' },
+                    { id: 'rock', label: 'Rock Enérgico', badge: 'Graves/Agudos' },
+                    { id: 'pop', label: 'Pop & Vocales', badge: 'Voces Claras' },
+                    { id: 'electronic', label: 'Club / EDM', badge: 'Pegada Kick' },
+                    { id: 'acoustic', label: 'Acústico', badge: 'Natural' },
+                    { id: 'slowed', label: 'Slowed + Reverb', badge: '0.84x' },
+                    { id: 'nightcore', label: 'Nightcore', badge: '1.25x' },
+                    { id: 'lofi', label: 'Lo-Fi Vinilo', badge: 'Filtro 1.8k' }
+                  ].map((p) => (
+                    <button
+                      key={p.id}
+                      onClick={() => applyAudioPreset(p.id as AudioPreset)}
+                      className={`p-2.5 rounded-xl border text-left transition flex flex-col justify-between ${
+                        activePreset === p.id
+                          ? 'bg-emerald-500/20 border-emerald-500/80 text-emerald-300'
+                          : 'bg-zinc-950/70 border-zinc-800 text-zinc-300 hover:bg-zinc-800/80'
+                      }`}
+                    >
+                      <span className="text-xs font-bold truncate">{p.label}</span>
+                      <span className="text-[10px] text-zinc-500 font-mono mt-1">{p.badge}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
 
-              {/* Sliders de Velocidad y Filtro Lo-Fi */}
+              {/* CONTROL DE SUPER BOOST DE VOLUMEN (> 100% HASTA 200%) */}
+              <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Volume2 className="w-4 h-4 text-amber-400" />
+                    <span className="text-xs font-bold text-zinc-200">
+                      Super Preamp / Ganancia de Volumen Extra (hasta 200%)
+                    </span>
+                  </div>
+                  <span className={`text-xs font-mono font-black px-2 py-0.5 rounded-full ${
+                    volume > 1.0 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' : 'bg-zinc-800 text-zinc-300'
+                  }`}>
+                    {Math.round(volume * 100)}% {volume > 1.0 ? '⚡ BOOST' : 'NORMAL'}
+                  </span>
+                </div>
+
+                <input
+                  type="range"
+                  min="0"
+                  max="2.0"
+                  step="0.02"
+                  value={isMuted ? 0 : volume}
+                  onChange={(e) => {
+                    setIsMuted(false);
+                    setVolume(Number(e.target.value));
+                  }}
+                  className="w-full accent-amber-500 cursor-pointer h-2 bg-zinc-800 rounded-lg"
+                />
+
+                <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                  {[
+                    { label: '100% Normal', val: 1.0 },
+                    { label: '120% Boost', val: 1.2 },
+                    { label: '130% Boost', val: 1.3 },
+                    { label: '150% Super Boost', val: 1.5 },
+                    { label: '180% Extra', val: 1.8 },
+                    { label: '200% Máximo', val: 2.0 }
+                  ].map((btn) => (
+                    <button
+                      key={btn.val}
+                      onClick={() => {
+                        setIsMuted(false);
+                        setVolume(btn.val);
+                        showToast(`Volumen ajustado a ${btn.label}`);
+                      }}
+                      className={`text-[11px] font-mono px-2.5 py-1 rounded-lg border transition ${
+                        Math.abs(volume - btn.val) < 0.03
+                          ? 'bg-amber-500 text-black font-extrabold border-amber-400'
+                          : 'bg-zinc-950 border-zinc-800 text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      {btn.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* SLIDERS EQ 5 BANDAS */}
+              <div className="space-y-2">
+                <span className="text-xs font-bold text-zinc-300 block">
+                  Ajuste Fino por Bandas de Frecuencia:
+                </span>
+                <div className="grid grid-cols-5 gap-3 bg-zinc-900/70 border border-zinc-800/80 rounded-xl p-4">
+                  {EQ_BANDS.map((band, idx) => (
+                    <div key={band.freq} className="flex flex-col items-center space-y-2">
+                      <span className="text-xs font-mono font-bold text-emerald-400">
+                        {eqGains[idx] > 0 ? `+${eqGains[idx]}` : eqGains[idx]} dB
+                      </span>
+                      <input
+                        type="range"
+                        min="-12"
+                        max="12"
+                        step="1"
+                        value={eqGains[idx]}
+                        onChange={(e) => {
+                          const next = [...eqGains];
+                          next[idx] = Number(e.target.value);
+                          setEqGains(next);
+                        }}
+                        className="w-full accent-emerald-500 cursor-pointer"
+                      />
+                      <span className="text-[11px] text-zinc-400 text-center font-medium">{band.label}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* SLIDERS DE VELOCIDAD Y FILTRO PASA-BAJOS */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div className="bg-zinc-900/70 border border-zinc-800 rounded-xl p-3.5 space-y-2">
                   <div className="flex justify-between text-xs">
@@ -2472,45 +3709,6 @@ export default function App() {
                 </div>
               </div>
             </div>
-          ) : activeTab === 'server' ? (
-            /* CONEXIÓN SERVIDOR FASTAPI */
-            <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-5 space-y-5">
-              <div>
-                <h3 className="text-lg font-bold flex items-center gap-2">
-                  <Server className={`w-5 h-5 ${accentClasses.text}`} />
-                  Nodo Backend Híbrido (FastAPI + Docker + Red Local)
-                </h3>
-                <p className="text-xs text-zinc-400 mt-1">
-                  Conecta tu servidor autoalojado en tu PC o NAS para transmitir toda tu biblioteca personal de música a tu celular.
-                </p>
-              </div>
-
-              <div className="bg-zinc-900/80 border border-zinc-800 rounded-xl p-4 space-y-3">
-                <label className="text-xs font-bold uppercase tracking-wider text-zinc-400 block">
-                  URL de tu Servidor FastAPI (IP Local o Tailscale VPN)
-                </label>
-                <div className="flex flex-col sm:flex-row gap-2">
-                  <input
-                    type="text"
-                    value={fastApiUrl}
-                    onChange={(e) => setFastApiUrl(e.target.value)}
-                    placeholder="http://192.168.1.100:8000"
-                    className="flex-1 bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-sm font-mono text-zinc-200 focus:outline-none focus:border-emerald-500"
-                  />
-                  <button
-                    onClick={connectFastApiServer}
-                    disabled={serverStatus === 'connecting'}
-                    className={`${accentClasses.bg} text-black font-bold text-sm px-5 py-2 rounded-xl flex items-center justify-center gap-2 transition`}
-                  >
-                    <RefreshCw className={`w-4 h-4 ${serverStatus === 'connecting' ? 'animate-spin' : ''}`} />
-                    {serverStatus === 'connected' ? 'Re-Sincronizar' : 'Conectar Servidor'}
-                  </button>
-                </div>
-                <p className="text-[11px] text-zinc-400">
-                  En el repositorio incluimos el archivo listo <code className="text-emerald-400">server.py</code> en Python para ejecutar con un solo clic.
-                </p>
-              </div>
-            </div>
           ) : (
             /* LISTA PRINCIPAL DE PISTAS (CATÁLOGO / BÓVEDA OFFLINE) */
             <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 space-y-3">
@@ -2519,27 +3717,29 @@ export default function App() {
                   <h3 className="text-base font-bold text-white flex items-center gap-2">
                     {activeTab === 'vault' ? (
                       <>
-                        <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                        Bóveda Offline Diaz Music (Almacenamiento Local Celular)
+                        <ShieldCheck className={`w-4 h-4 ${accentClasses.text}`} />
+                        Bóveda Offline (Descargas)
                       </>
                     ) : (
                       <>
-                        <ListMusic className="w-4 h-4 text-emerald-400" />
-                        Catálogo Libre & Descubrimiento
+                        <Flame className={`w-4 h-4 ${accentClasses.text}`} />
+                        Tendencias & Recomendaciones
                       </>
                     )}
                   </h3>
                   <p className="text-xs text-zinc-400">
                     {activeTab === 'vault'
-                      ? 'Canciones guardadas en tu memoria interna. Funcionan sin internet y sin gastar datos móviles.'
-                      : 'Música 100% gratuita. Toca para reproducir o guarda en tu bóveda.'}
+                      ? 'Canciones descargadas en la memoria de tu dispositivo. Escucha sin consumir datos.'
+                      : 'Música en tendencia seleccionada para ti según tus gustos.'}
                   </p>
                 </div>
-                <span className="text-xs text-zinc-400 font-mono">{filteredTracks.length} canciones</span>
+                <span className="text-xs text-zinc-400 font-mono">
+                  {homeTotalPages > 1 ? `Página ${homeCurrentPage} de ${homeTotalPages}` : `${filteredTracks.length} canciones`}
+                </span>
               </div>
 
               <div className="space-y-1.5">
-                {filteredTracks.map((track) => {
+                {paginatedHomeTracks.map((track) => {
                   const realIndex = tracks.findIndex((t) => t.id === track.id);
                   const isCurrent = realIndex === currentTrackIndex;
 
@@ -2562,7 +3762,11 @@ export default function App() {
                             }`}
                           >
                             {isCurrent && isPlaying ? (
-                              <Activity className={`w-5 h-5 ${accentClasses.text} animate-pulse`} />
+                              <div className="flex items-end gap-0.5 h-4">
+                                <span className={`w-1 bg-current rounded-full animate-bounce ${accentClasses.text}`} style={{ animationDuration: '0.5s' }} />
+                                <span className={`w-1 bg-current rounded-full animate-bounce ${accentClasses.text}`} style={{ animationDuration: '0.35s', animationDelay: '0.15s' }} />
+                                <span className={`w-1 bg-current rounded-full animate-bounce ${accentClasses.text}`} style={{ animationDuration: '0.65s', animationDelay: '0.3s' }} />
+                              </div>
                             ) : (
                               <Play className="w-5 h-5 text-white fill-current" />
                             )}
@@ -2574,24 +3778,9 @@ export default function App() {
                             <p className={`text-sm font-bold truncate ${isCurrent ? accentClasses.text : 'text-zinc-100'}`}>
                               {track.title}
                             </p>
-                            {track.sourceType === 'audius' && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 font-semibold">
-                                Audius
-                              </span>
-                            )}
                             {track.sourceType === 'local-file' && (
                               <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-semibold">
                                 MP3 Celular
-                              </span>
-                            )}
-                            {track.sourceType === 'rea-reverse' && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-semibold">
-                                REA Spotify
-                              </span>
-                            )}
-                            {track.sourceType === 'jamendo' && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-semibold">
-                                Jamendo Full
                               </span>
                             )}
                           </div>
@@ -2648,6 +3837,18 @@ export default function App() {
                           </button>
                         )}
 
+                        {/* Añadir a Playlist */}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setPlaylistModalTrack(track);
+                          }}
+                          title="Añadir a una playlist"
+                          className="p-2 rounded-xl border border-zinc-800 text-zinc-400 hover:text-cyan-300 hover:border-cyan-500/50 bg-zinc-900 transition"
+                        >
+                          <ListPlus className="w-4 h-4" />
+                        </button>
+
                         {/* Like */}
                         <button
                           onClick={(e) => toggleLike(track.id, e)}
@@ -2662,14 +3863,40 @@ export default function App() {
                   );
                 })}
               </div>
+
+              {/* Controles de Paginación para Tendencias & Recomendaciones (Máximo 10 por vista) */}
+              {homeTotalPages > 1 && (
+                <div className="flex items-center justify-between pt-3 border-t border-zinc-800/80 px-1 mt-3">
+                  <button
+                    onClick={() => setHomeCurrentPage((p) => Math.max(1, p - 1))}
+                    disabled={homeCurrentPage === 1}
+                    className="px-3.5 py-1.5 rounded-xl border border-zinc-800 bg-zinc-900/80 hover:bg-zinc-850 text-xs font-semibold text-zinc-300 disabled:opacity-30 disabled:pointer-events-none transition"
+                  >
+                    ← Anterior
+                  </button>
+                  <span className="text-xs text-zinc-400 font-mono">
+                    Página {homeCurrentPage} de {homeTotalPages} ({filteredTracks.length} canciones)
+                  </span>
+                  <button
+                    onClick={() => setHomeCurrentPage((p) => Math.min(homeTotalPages, p + 1))}
+                    disabled={homeCurrentPage >= homeTotalPages}
+                    className={`px-3.5 py-1.5 rounded-xl ${accentClasses.bg} text-black text-xs font-extrabold disabled:opacity-30 disabled:pointer-events-none shadow-md transition`}
+                  >
+                    Siguiente →
+                  </button>
+                </div>
+              )}
             </div>
           )}
+
+          {/* Espaciador inferior para garantizar que el reproductor persistente nunca tape el contenido */}
+          <div className="h-32 sm:h-40 w-full shrink-0 pointer-events-none" aria-hidden="true" />
         </main>
 
         {/* COLUMNA DERECHA: SEPARADA PARA RADIO Y MÚSICA */}
         {activeTab === 'radio' ? (
           /* PANEL LATERAL DERECHO DE RADIO EN VIVO */
-          <aside className="lg:col-span-3 space-y-4">
+          <aside className="order-3 lg:order-3 lg:col-span-3 space-y-4">
             {/* Control Audífonos & Casco */}
             <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 space-y-3.5">
               <div className="flex items-center justify-between">
@@ -2742,10 +3969,12 @@ export default function App() {
                 </div>
               </div>
             </div>
+            {/* Espaciador inferior */}
+            <div className="h-28 sm:h-36 w-full shrink-0 pointer-events-none" aria-hidden="true" />
           </aside>
         ) : (
           /* PANEL LATERAL DERECHO DE MÚSICA (Audio 8D, Loop A-B, Letras & Notas) */
-          <aside className="lg:col-span-3 space-y-4">
+          <aside className="order-3 lg:order-3 lg:col-span-3 space-y-4">
             {/* PANEL AUDIO 8D & INTERCOM / AUDÍFONOS */}
             <div className="bg-[#11131C] border border-zinc-800/80 rounded-2xl p-4 space-y-3.5">
               <div className="flex items-center justify-between">
@@ -2900,6 +4129,8 @@ export default function App() {
                 ))}
               </div>
             </div>
+            {/* Espaciador inferior */}
+            <div className="h-28 sm:h-36 w-full shrink-0 pointer-events-none" aria-hidden="true" />
           </aside>
         )}
       </div>
@@ -2993,7 +4224,7 @@ export default function App() {
                       setCurrentTime(val);
                       if (audioRef.current) audioRef.current.currentTime = val;
                     }}
-                    className="w-full h-1.5 bg-zinc-800 rounded-lg accent-emerald-500 cursor-pointer"
+                    className={`w-full h-1.5 bg-zinc-800 rounded-lg ${accentClasses.accent} cursor-pointer`}
                   />
                   <div className="flex justify-between text-[11px] font-mono text-zinc-400">
                     <span>{formatTime(currentTime)}</span>
@@ -3035,6 +4266,76 @@ export default function App() {
               </button>
             </div>
 
+            {/* CONTROL DE VOLUMEN CON SUPER BOOST > 100% PARA CELULAR */}
+            <div className="bg-zinc-900/90 border border-zinc-800/90 rounded-2xl p-3.5 space-y-2.5 mt-1 shadow-lg">
+              <div className="flex items-center justify-between">
+                <button
+                  onClick={() => setIsMuted(!isMuted)}
+                  className="flex items-center gap-1.5 text-xs text-zinc-300 hover:text-white font-medium"
+                >
+                  {isMuted || volume === 0 ? (
+                    <VolumeX className="w-4 h-4 text-rose-400" />
+                  ) : (
+                    <Volume2 className={`w-4 h-4 ${volume > 1.0 ? 'text-amber-400' : accentClasses.text}`} />
+                  )}
+                  <span>{isMuted ? 'Silenciado' : 'Volumen'}</span>
+                </button>
+                <div className="flex items-center gap-1.5">
+                  <span className={`font-mono text-xs font-black ${
+                    volume > 1.0 ? 'text-amber-400 animate-pulse' : 'text-zinc-200'
+                  }`}>
+                    {isMuted ? '0%' : `${Math.round(volume * 100)}%`}
+                  </span>
+                  {volume > 1.0 && (
+                    <span className="text-[9px] font-black tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse">
+                      ⚡ BOOST
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Slider táctil de 0% a 200% */}
+              <input
+                type="range"
+                min="0"
+                max="2.0"
+                step="0.02"
+                value={isMuted ? 0 : volume}
+                onChange={(e) => {
+                  setIsMuted(false);
+                  setVolume(Number(e.target.value));
+                }}
+                className="w-full accent-amber-500 h-2 bg-zinc-800 rounded-lg cursor-pointer"
+              />
+
+              {/* Botones de Boost directo para audífonos y casco */}
+              <div className="flex items-center justify-between gap-1 pt-0.5">
+                {[
+                  { label: '80%', val: 0.8 },
+                  { label: '100%', val: 1.0 },
+                  { label: '120% ⚡', val: 1.2 },
+                  { label: '150% ⚡', val: 1.5 },
+                  { label: '200% 🚀', val: 2.0 }
+                ].map((btn) => (
+                  <button
+                    key={btn.val}
+                    onClick={() => {
+                      setIsMuted(false);
+                      setVolume(btn.val);
+                      showToast(`Volumen: ${btn.label}`);
+                    }}
+                    className={`flex-1 text-[10px] font-mono font-bold py-1.5 rounded-lg border text-center transition ${
+                      Math.abs(volume - btn.val) < 0.04
+                        ? 'bg-amber-500 text-black border-amber-400 shadow-md font-extrabold'
+                        : 'bg-zinc-950/70 border-zinc-800 text-zinc-400 hover:text-white'
+                    }`}
+                  >
+                    {btn.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {/* Indicador de Salida de Audio */}
             <div className="flex items-center justify-center gap-2 pt-2 text-xs text-zinc-400">
               <Headphones className="w-4 h-4 text-emerald-400" />
@@ -3044,15 +4345,15 @@ export default function App() {
         </div>
       )}
 
-      {/* BARRA DE NAVEGACIÓN INFERIOR PARA CELULAR (ESTILO SPOTIFY MOBILE) */}
+      {/* BARRA DE NAVEGACIÓN INFERIOR PARA CELULAR (SPOTIFY PRO LIMPIO) */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0B0D12]/98 backdrop-blur-xl border-t border-zinc-800/80 px-2 py-1.5 flex items-center justify-around">
         {[
           { id: 'home', label: 'Inicio', icon: ListMusic },
-          { id: 'radio', label: 'Radio FM', icon: Radio },
-          { id: 'jamendo', label: 'Jamendo', icon: Disc },
-          { id: 'search', label: 'Buscar', icon: Globe },
-          { id: 'vault', label: 'Bóveda', icon: ShieldCheck },
-          { id: 'dsp-studio', label: 'DSP EQ', icon: Sliders }
+          { id: 'search', label: 'Buscar', icon: Search },
+          { id: 'playlists', label: 'Playlists', icon: FolderPlus },
+          { id: 'favorites', label: 'Favoritas', icon: Heart },
+          { id: 'radio', label: 'Radio', icon: Radio },
+          { id: 'dsp-studio', label: 'Ecualizador', icon: Sliders }
         ].map((item) => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
@@ -3090,14 +4391,26 @@ export default function App() {
               <button
                 onClick={(e) => toggleLike(currentTrack.id, e)}
                 className={`p-1.5 rounded-lg ${currentTrack.liked ? 'text-rose-500' : 'text-zinc-500 hover:text-white'}`}
+                title="Marcar como favorita"
               >
                 <Heart className={`w-4 h-4 ${currentTrack.liked ? 'fill-current' : ''}`} />
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setPlaylistModalTrack(currentTrack);
+                }}
+                className="p-1.5 rounded-lg text-zinc-500 hover:text-cyan-400"
+                title="Añadir a una playlist"
+              >
+                <ListPlus className="w-4 h-4" />
               </button>
               <button
                 onClick={(e) => toggleOfflineVault(currentTrack.id, e)}
                 className={`p-1.5 rounded-lg ${
                   currentTrack.cachedOffline ? 'text-emerald-400' : 'text-zinc-500 hover:text-white'
                 }`}
+                title="Descargar offline"
               >
                 <CheckCircle2 className="w-4 h-4" />
               </button>
@@ -3109,7 +4422,7 @@ export default function App() {
             <div className="flex items-center gap-5">
               <button
                 onClick={() => setAutoRadioEnabled(!autoRadioEnabled)}
-                title="Radio Infinita IA"
+                title={autoRadioEnabled ? 'Radio Inteligente Spotify ACTIVA (+50% aprendido)' : 'Activar Radio Inteligente'}
                 className={`text-xs flex items-center gap-1 ${
                   autoRadioEnabled ? accentClasses.text : 'text-zinc-500 hover:text-white'
                 }`}
@@ -3134,7 +4447,7 @@ export default function App() {
 
               <button
                 onClick={() => setActiveTab(activeTab === 'dsp-studio' ? 'home' : 'dsp-studio')}
-                title="Abrir Ecualizador DSP"
+                title="Abrir Ecualizador DSP & Boost"
                 className={`text-xs flex items-center gap-1 ${
                   activeTab === 'dsp-studio' ? accentClasses.text : 'text-zinc-400 hover:text-white'
                 }`}
@@ -3172,7 +4485,7 @@ export default function App() {
                       setCurrentTime(val);
                       if (audioRef.current) audioRef.current.currentTime = val;
                     }}
-                    className="w-full h-1.5 bg-zinc-800 rounded-lg accent-emerald-500 cursor-pointer"
+                    className={`w-full h-1.5 bg-zinc-800 rounded-lg ${accentClasses.accent} cursor-pointer`}
                   />
                 </div>
                 <span className="text-[11px] font-mono text-zinc-400 w-9">
@@ -3182,7 +4495,7 @@ export default function App() {
             )}
           </div>
 
-          {/* Volumen y velocidad */}
+          {/* Volumen con Boost > 100% y velocidad */}
           <div className="hidden md:flex md:col-span-3 items-center justify-end gap-3">
             <span className="text-[11px] font-mono px-2 py-1 rounded bg-zinc-900 border border-zinc-800 text-zinc-300">
               {playbackSpeed.toFixed(2)}x
@@ -3191,25 +4504,390 @@ export default function App() {
             <button
               onClick={() => setIsMuted(!isMuted)}
               className="text-zinc-400 hover:text-white transition"
+              title={isMuted ? 'Desmutear' : 'Silenciar'}
             >
               {isMuted || volume === 0 ? <VolumeX className="w-5 h-5 text-rose-400" /> : <Volume2 className="w-5 h-5" />}
             </button>
 
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.02"
-              value={isMuted ? 0 : volume}
-              onChange={(e) => {
-                setIsMuted(false);
-                setVolume(Number(e.target.value));
-              }}
-              className="w-24 h-1.5 bg-zinc-800 rounded-lg accent-emerald-500 cursor-pointer"
-            />
+            {/* Slider de volumen con soporte hasta 200% Super Boost */}
+            <div className="flex items-center gap-2">
+              <input
+                type="range"
+                min="0"
+                max="2.0"
+                step="0.02"
+                value={isMuted ? 0 : volume}
+                onChange={(e) => {
+                  setIsMuted(false);
+                  setVolume(Number(e.target.value));
+                }}
+                className={`w-20 lg:w-24 h-1.5 bg-zinc-800 rounded-lg ${accentClasses.accent} cursor-pointer`}
+              />
+              <span className={`text-[10px] font-mono font-bold w-12 text-right ${
+                volume > 1.0 ? 'text-amber-400 font-extrabold animate-pulse' : 'text-zinc-400'
+              }`}>
+                {isMuted ? '0%' : `${Math.round(volume * 100)}%`}
+              </span>
+              <button
+                onClick={() => {
+                  setIsMuted(false);
+                  const nextVol = volume < 1.0 ? 1.0 : volume < 1.2 ? 1.2 : volume < 1.5 ? 1.5 : volume < 2.0 ? 2.0 : 0.8;
+                  setVolume(nextVol);
+                  showToast(`Volumen: ${Math.round(nextVol * 100)}% ${nextVol > 1 ? '⚡ Super Boost' : ''}`);
+                }}
+                className={`text-[9px] font-mono font-bold px-1.5 py-0.5 rounded border transition ${
+                  volume > 1.0
+                    ? 'bg-amber-500 text-black border-amber-400 font-extrabold shadow-sm'
+                    : 'bg-zinc-850 text-zinc-400 border-zinc-700 hover:text-white'
+                }`}
+                title="Super Boost de volumen por encima del 100%"
+              >
+                {volume > 1.0 ? `${Math.round(volume * 100)}% ⚡` : 'Boost +'}
+              </button>
+            </div>
           </div>
         </div>
       </footer>
+
+      {/* ========================================== */}
+      {/* MODAL: AÑADIR A PLAYLIST */}
+      {/* ========================================== */}
+      {playlistModalTrack && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#121522] border border-zinc-700/80 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <FolderPlus className="w-5 h-5 text-emerald-400" />
+                <h3 className="font-bold text-white text-base">Añadir a Playlist</h3>
+              </div>
+              <button
+                onClick={() => setPlaylistModalTrack(null)}
+                className="text-zinc-400 hover:text-white p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex items-center gap-3 bg-zinc-900/60 p-2.5 rounded-xl border border-zinc-800">
+              <img
+                src={playlistModalTrack.coverUrl}
+                alt={playlistModalTrack.title}
+                className="w-12 h-12 rounded-xl object-cover border border-zinc-800 shrink-0"
+              />
+              <div className="min-w-0 flex-1">
+                <p className="text-xs font-bold text-white truncate">{playlistModalTrack.title}</p>
+                <p className="text-[11px] text-zinc-400 truncate">{playlistModalTrack.artist}</p>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <span className="text-xs font-bold text-zinc-300 block">Selecciona la lista destino:</span>
+              <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
+                {playlists.map((pl) => (
+                  <button
+                    key={pl.id}
+                    onClick={() => handleAddTrackToPlaylist(pl.id, playlistModalTrack)}
+                    className="w-full flex items-center justify-between p-2.5 rounded-xl border border-zinc-800 hover:border-emerald-500/60 bg-zinc-900/50 hover:bg-zinc-800/80 transition text-left"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs font-bold text-zinc-200 truncate">{pl.name}</p>
+                      <p className="text-[10px] text-zinc-500">{pl.tracks.length} canciones</p>
+                    </div>
+                    <Plus className="w-4 h-4 text-emerald-400" />
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Crear nueva playlist al vuelo */}
+            <div className="pt-2 border-t border-zinc-800 flex items-center justify-between">
+              <button
+                onClick={() => {
+                  setIsNewPlaylistModalOpen(true);
+                }}
+                className="text-xs text-emerald-400 hover:underline font-bold flex items-center gap-1.5"
+              >
+                <Plus className="w-3.5 h-3.5" /> Crear nueva lista ahora
+              </button>
+              <button
+                onClick={() => setPlaylistModalTrack(null)}
+                className="text-xs bg-zinc-800 hover:bg-zinc-700 px-3.5 py-1.5 rounded-xl text-zinc-300"
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================== */}
+      {/* MODAL: CREAR NUEVA PLAYLIST */}
+      {/* ========================================== */}
+      {isNewPlaylistModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#121522] border border-zinc-700/80 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <FolderPlus className="w-5 h-5 text-emerald-400" />
+                <h3 className="font-bold text-white text-base">Crear Nueva Playlist</h3>
+              </div>
+              <button
+                onClick={() => setIsNewPlaylistModalOpen(false)}
+                className="text-zinc-400 hover:text-white p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-bold text-zinc-300 block mb-1">Nombre de la lista:</label>
+                <input
+                  type="text"
+                  value={newPlaylistName}
+                  onChange={(e) => setNewPlaylistName(e.target.value)}
+                  placeholder="Ej: Reggaeton 2026, Viaje en Moto, Clásicos..."
+                  className="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-xl px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none"
+                  autoFocus
+                />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-zinc-300 block mb-1">Descripción (opcional):</label>
+                <input
+                  type="text"
+                  value={newPlaylistDesc}
+                  onChange={(e) => setNewPlaylistDesc(e.target.value)}
+                  placeholder="Ej: Mezcla con bajos pesados para mis audífonos"
+                  className="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-xl px-3.5 py-2 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
+              <button
+                onClick={() => setIsNewPlaylistModalOpen(false)}
+                className="text-xs bg-zinc-800 hover:bg-zinc-700 px-4 py-2 rounded-xl text-zinc-300 transition"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => handleCreatePlaylist(newPlaylistName, newPlaylistDesc)}
+                className={`${accentClasses.bg} text-black font-extrabold text-xs px-5 py-2 rounded-xl transition shadow-lg`}
+              >
+                Crear Playlist
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================== */}
+      {/* MODAL: CONFIGURAR SERVIDOR LOCAL / NAS */}
+      {/* ========================================== */}
+      {showServerModal && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#121522] border border-zinc-700/80 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-zinc-800">
+              <div className="flex items-center gap-2">
+                <Server className="w-5 h-5 text-emerald-400" />
+                <h3 className="font-bold text-white text-base">Servidor de Streaming Backend</h3>
+              </div>
+              <button
+                onClick={() => setShowServerModal(false)}
+                className="text-zinc-400 hover:text-white p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3 rounded-xl border border-zinc-800 bg-zinc-900/60 text-xs space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-zinc-300">Estado de Conexión:</span>
+                <span className={`font-mono font-bold px-2 py-0.5 rounded-full ${
+                  serverStatus === 'connected'
+                    ? 'bg-emerald-950 text-emerald-400 border border-emerald-500/40'
+                    : 'bg-amber-950 text-amber-400 border border-amber-500/40'
+                }`}>
+                  {serverStatus === 'connected' ? '● Conectado (Full-Stream)' : '○ Desconectado'}
+                </span>
+              </div>
+              <p className="text-zinc-400 text-[11px]">
+                Cuando el servidor local está activo con <code className="text-emerald-300 font-mono">python server.py</code>, todas las canciones se transmiten COMPLETAS (3 a 5+ min) sin límite de 30 segundos.
+              </p>
+            </div>
+
+            <div>
+              <label className="text-xs font-bold text-zinc-300 block mb-1">URL del Servidor FastAPI:</label>
+              <input
+                type="text"
+                value={fastApiUrl}
+                onChange={(e) => setFastApiUrl(e.target.value)}
+                placeholder="http://localhost:8000"
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs font-mono text-zinc-200 focus:outline-none focus:border-emerald-500"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
+              <button
+                onClick={() => setShowServerModal(false)}
+                className="text-xs bg-zinc-800 hover:bg-zinc-700 px-4 py-2 rounded-xl text-zinc-300 transition"
+              >
+                Cerrar
+              </button>
+              <button
+                onClick={connectFastApiServer}
+                disabled={serverStatus === 'connecting'}
+                className={`${accentClasses.bg} text-black font-extrabold text-xs px-5 py-2 rounded-xl transition flex items-center gap-1.5 shadow-lg`}
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${serverStatus === 'connecting' ? 'animate-spin' : ''}`} />
+                {serverStatus === 'connected' ? 'Re-Probar' : 'Conectar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================== */}
+      {/* MODAL: INICIAR SESIÓN / CREAR CUENTA */}
+      {/* ========================================== */}
+      {isAuthModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
+          <div className="bg-[#121522] border border-zinc-700/90 rounded-3xl max-w-md w-full p-6 shadow-2xl space-y-5">
+            {/* Header del modal */}
+            <div className="flex items-center justify-between pb-3 border-b border-zinc-800">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-emerald-500 to-cyan-500 text-black flex items-center justify-center shadow">
+                  <User className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-white text-base">
+                    {authMode === 'login' ? 'Iniciar Sesión' : 'Crear Tu Cuenta'}
+                  </h3>
+                  <p className="text-[11px] text-zinc-400">
+                    Tus playlists, gustos y sugerencias privadas
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setIsAuthModalOpen(false);
+                  setAuthError(null);
+                }}
+                className="text-zinc-400 hover:text-white p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Selector de pestañas: Iniciar Sesión / Registrarse */}
+            <div className="grid grid-cols-2 p-1 bg-zinc-900 border border-zinc-800 rounded-xl gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('login');
+                  setAuthError(null);
+                }}
+                className={`py-2 text-xs font-bold rounded-lg transition ${
+                  authMode === 'login' ? `${accentClasses.bg} text-black shadow-md` : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Iniciar Sesión
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAuthMode('register');
+                  setAuthError(null);
+                }}
+                className={`py-2 text-xs font-bold rounded-lg transition ${
+                  authMode === 'register' ? `${accentClasses.bg} text-black shadow-md` : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Crear Cuenta
+              </button>
+            </div>
+
+            {/* Mensaje de error si ocurre */}
+            {authError && (
+              <div className="bg-rose-950/70 border border-rose-500/50 text-rose-300 text-xs px-3.5 py-2.5 rounded-xl flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{authError}</span>
+              </div>
+            )}
+
+            {/* Formulario */}
+            <form onSubmit={authMode === 'login' ? handleLoginSubmit : handleRegisterSubmit} className="space-y-3.5">
+              <div>
+                <label className="text-xs font-bold text-zinc-300 block mb-1">Nombre de Usuario:</label>
+                <input
+                  type="text"
+                  value={authUsername}
+                  onChange={(e) => setAuthUsername(e.target.value)}
+                  placeholder="ej: jhoel, maria, etc."
+                  required
+                  autoFocus
+                  className="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-xl px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none font-mono"
+                />
+              </div>
+
+              {authMode === 'register' && (
+                <div>
+                  <label className="text-xs font-bold text-zinc-300 block mb-1">Tu Nombre o Apodo:</label>
+                  <input
+                    type="text"
+                    value={authDisplayName}
+                    onChange={(e) => setAuthDisplayName(e.target.value)}
+                    placeholder="ej: Thomas"
+                    className="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-xl px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="text-xs font-bold text-zinc-300 block mb-1">Contraseña:</label>
+                <input
+                  type="password"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  placeholder="••••••••"
+                  required
+                  className="w-full bg-zinc-950 border border-zinc-800 focus:border-emerald-500 rounded-xl px-3.5 py-2.5 text-xs text-zinc-100 placeholder-zinc-500 focus:outline-none font-mono"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={isAuthLoading}
+                className={`w-full ${accentClasses.bg} text-black font-extrabold text-sm py-2.5 rounded-xl flex items-center justify-center gap-2 shadow-xl hover:opacity-95 transition disabled:opacity-50 mt-2`}
+              >
+                {isAuthLoading ? (
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                ) : authMode === 'login' ? (
+                  <LogIn className="w-4 h-4" />
+                ) : (
+                  <UserPlus className="w-4 h-4" />
+                )}
+                <span>{authMode === 'login' ? 'Entrar a Mi Música' : 'Registrar y Comenzar'}</span>
+              </button>
+            </form>
+
+            <div className="pt-2 border-t border-zinc-800/80 flex items-center justify-between text-xs text-zinc-400">
+              <span className="text-[11px] text-zinc-500">¿No quieres crear cuenta ahora?</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setIsAuthModalOpen(false);
+                  setAuthError(null);
+                }}
+                className="text-zinc-300 hover:text-white font-medium hover:underline"
+              >
+                Seguir como Invitado →
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -2,11 +2,11 @@ import { Track } from '../types';
 
 // Client ID oficial proporcionado por el usuario (Application: jhoel's App)
 export const DEFAULT_JAMENDO_CLIENT_ID = 'ed533789';
-const JAMENDO_STORAGE_KEY = 'diaz_music_jamendo_client_id';
+const JAMENDO_STORAGE_KEY = 'thomas_music_jamendo_client_id';
 
 export function getStoredJamendoClientId(): string {
   if (typeof window !== 'undefined') {
-    const saved = localStorage.getItem(JAMENDO_STORAGE_KEY);
+    const saved = localStorage.getItem(JAMENDO_STORAGE_KEY) || localStorage.getItem('diaz_music_jamendo_client_id');
     if (saved && saved.trim()) return saved.trim();
   }
   return DEFAULT_JAMENDO_CLIENT_ID;

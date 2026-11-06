@@ -28,8 +28,56 @@ export interface Track {
   lyrics: LyricLine[];
 }
 
-export type VisualizerMode = 'bars' | 'wave' | 'circle';
-export type ThemeAccent = 'emerald' | 'cyberpunk' | 'violet';
-export type AudioPreset = 'normal' | 'slowed' | 'nightcore' | 'lofi' | 'bassboost';
-export type ActiveTab = 'home' | 'radio' | 'search' | 'jamendo' | 'ai-radio' | 'vault' | 'dsp-studio' | 'server' | 'rea-guide';
+export interface Playlist {
+  id: string;
+  name: string;
+  description?: string;
+  coverUrl?: string;
+  createdAt: number;
+  tracks: Track[];
+}
 
+export interface UserProfile {
+  id: string;
+  username: string;
+  displayName: string;
+  avatarUrl?: string;
+  createdAt: number;
+}
+
+export interface UserData {
+  playlists: Playlist[];
+  favorites50List: Track[];
+  userTasteProfile: {
+    favoriteArtists: Record<string, number>;
+    favoriteGenres: Record<string, number>;
+  };
+}
+
+export type VisualizerMode = 'bars' | 'wave' | 'circle';
+export type ThemeAccent = 'emerald' | 'blue' | 'pink' | 'violet' | 'cyberpunk';
+export type AudioPreset =
+  | 'normal'
+  | 'bassboost'
+  | 'subbass'
+  | 'reggaeton'
+  | 'rock'
+  | 'pop'
+  | 'electronic'
+  | 'acoustic'
+  | 'slowed'
+  | 'nightcore'
+  | 'lofi';
+
+export type ActiveTab =
+  | 'home'
+  | 'search'
+  | 'playlists'
+  | 'favorites'
+  | 'radio'
+  | 'dsp-studio'
+  | 'vault'
+  | 'jamendo'
+  | 'server'
+  | 'rea-guide'
+  | 'ai-radio';

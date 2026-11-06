@@ -218,7 +218,7 @@ export async function fetchStationsByCountry(countryCode: string, limit = 35): P
     )}&limit=${limit}&order=clickcount&reverse=true`;
 
     const res = await fetch(url, {
-      headers: { 'User-Agent': 'DiazMusicRadioPWA/1.0' },
+      headers: { 'User-Agent': 'ThomasMusicRadioPWA/1.0' },
       signal: AbortSignal.timeout(4500)
     });
 
@@ -245,7 +245,7 @@ export async function searchRadioStations(query: string, countryCode?: string): 
     }
 
     const res = await fetch(url, {
-      headers: { 'User-Agent': 'DiazMusicRadioPWA/1.0' },
+      headers: { 'User-Agent': 'ThomasMusicRadioPWA/1.0' },
       signal: AbortSignal.timeout(4500)
     });
 

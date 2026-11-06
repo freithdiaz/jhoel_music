@@ -91,7 +91,7 @@ export async function resolveSpotifyTrackViaRea(spotifyUrl: string, fastApiUrl?:
       lyrics: [
         { time: 0, text: `♪ ${title} ♪` },
         { time: 8, text: `Original de ${artist} - Importado mediante REA Bridge` },
-        { time: 20, text: 'Streaming decodificado libre de DRM en Diaz Music' },
+        { time: 20, text: 'Streaming decodificado libre de DRM en Thomas Music' },
         { time: 50, text: '♪ [Disfruta el sonido con DSP 5-Bandas & Audio 8D] ♪' }
       ]
     };

@@ -1,5 +1,5 @@
 """
-Diaz Music - Servidor Backend FastAPI & Streamer Universal (Full-Length Streaming)
+Thomas Music - Servidor Backend FastAPI & Streamer Universal (Full-Length Streaming)
 Elimina el límite de 30 segundos: transmite cualquier canción de internet COMPLETA (3 a 5+ minutos)
 en tiempo real a tu celular o PC sin descargarla al disco.
 """
@@ -10,14 +10,17 @@ import mimetypes
 import urllib.request
 import urllib.parse
 import json
+import sqlite3
+import hashlib
 from pathlib import Path
 from typing import List, Optional, Dict
+from pydantic import BaseModel
 from fastapi import FastAPI, HTTPException, Request, status, Query
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
 
-app = FastAPI(title="Diaz Music Universal Streamer", version="2.6.0")
+app = FastAPI(title="Thomas Music Universal Streamer", version="2.7.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,22 +75,213 @@ def get_stream_url(video_id: str) -> str:
         STREAM_CACHE[video_id] = (url, now + 14400)
         return url
 
+# ==========================================
+# BASE DE DATOS SQLITE: USUARIOS Y DATOS
+# ==========================================
+DB_PATH = Path("./diaz_music_users.db")
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            created_at REAL NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_data (
+            username TEXT PRIMARY KEY,
+            playlists TEXT NOT NULL,
+            favorites TEXT NOT NULL,
+            taste_profile TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+class RegisterRequest(BaseModel):
+    username: str
+    password: str
+    display_name: Optional[str] = None
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class UserSyncRequest(BaseModel):
+    username: str
+    playlists: list = []
+    favorites: list = []
+    taste_profile: dict = {}
+
+# ==========================================
+# ENDPOINTS DE AUTENTICACIÓN & MULTIUSUARIO
+# ==========================================
+@app.post("/auth/register")
+def register(req: RegisterRequest):
+    u = req.username.strip().lower()
+    p = req.password.strip()
+    if not u or len(u) < 3:
+        raise HTTPException(status_code=400, detail="El nombre de usuario debe tener al menos 3 caracteres")
+    if not p or len(p) < 4:
+        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 4 caracteres")
+
+    name = (req.display_name or u).strip()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id FROM users WHERE username = ?", (u,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=409, detail="Ese nombre de usuario ya está registrado")
+
+        user_id = f"user-{int(time.time() * 1000)}"
+        cursor.execute(
+            "INSERT INTO users (id, username, password_hash, display_name, created_at) VALUES (?, ?, ?, ?, ?)",
+            (user_id, u, hash_password(p), name, time.time())
+        )
+        cursor.execute(
+            "INSERT INTO user_data (username, playlists, favorites, taste_profile, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (u, "[]", "[]", "{}", time.time())
+        )
+        conn.commit()
+        return {
+            "status": "success",
+            "user": {
+                "id": user_id,
+                "username": u,
+                "displayName": name,
+                "createdAt": time.time()
+            }
+        }
+    finally:
+        conn.close()
+
+@app.post("/auth/login")
+def login(req: LoginRequest):
+    u = req.username.strip().lower()
+    p = req.password.strip()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id, username, password_hash, display_name, created_at FROM users WHERE username = ?", (u,))
+        row = cursor.fetchone()
+        if not row or row[2] != hash_password(p):
+            raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
+
+        cursor.execute("SELECT playlists, favorites, taste_profile FROM user_data WHERE username = ?", (u,))
+        data_row = cursor.fetchone()
+        playlists = json.loads(data_row[0]) if data_row and data_row[0] else []
+        favorites = json.loads(data_row[1]) if data_row and data_row[1] else []
+        taste_profile = json.loads(data_row[2]) if data_row and data_row[2] else {"favoriteArtists": {}, "favoriteGenres": {}}
+
+        return {
+            "status": "success",
+            "user": {
+                "id": row[0],
+                "username": row[1],
+                "displayName": row[3],
+                "createdAt": row[4]
+            },
+            "data": {
+                "playlists": playlists,
+                "favorites": favorites,
+                "tasteProfile": taste_profile
+            }
+        }
+    finally:
+        conn.close()
+
+@app.post("/user/sync")
+def sync_user_data(req: UserSyncRequest):
+    u = req.username.strip().lower()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT id FROM users WHERE username = ?", (u,))
+        if not cursor.fetchone():
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+        cursor.execute("""
+            INSERT INTO user_data (username, playlists, favorites, taste_profile, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(username) DO UPDATE SET
+                playlists = excluded.playlists,
+                favorites = excluded.favorites,
+                taste_profile = excluded.taste_profile,
+                updated_at = excluded.updated_at
+        """, (u, json.dumps(req.playlists), json.dumps(req.favorites), json.dumps(req.taste_profile), time.time()))
+        conn.commit()
+        return {"status": "synced", "updated_at": time.time()}
+    finally:
+        conn.close()
+
+@app.get("/user/data/{username}")
+def get_user_data(username: str):
+    u = username.strip().lower()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT playlists, favorites, taste_profile FROM user_data WHERE username = ?", (u,))
+        row = cursor.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Datos no encontrados")
+        return {
+            "playlists": json.loads(row[0]),
+            "favorites": json.loads(row[1]),
+            "tasteProfile": json.loads(row[2])
+        }
+    finally:
+        conn.close()
+
 @app.get("/")
 @app.get("/health")
 def health_check():
     return {
         "status": "online",
-        "service": "Diaz Music Universal Streamer",
+        "service": "Thomas Music Universal Streamer",
         "full_length_streaming": True,
         "mode": "Sin límite de 30 segundos • Canciones 100% completas",
         "local_tracks": len(list(MUSIC_DIR.glob("*.*")))
     }
 
 # ==========================================
-# 1. BÚSQUEDA RÁPIDA DE CANCIONES COMPLETAS (1.4s)
+# 1. BÚSQUEDA RÁPIDA Y SUGERENCIAS EN VIVO (AUTOCLETO)
 # ==========================================
+@app.get("/suggestions")
+def get_suggestions(q: str = Query(..., description="Término para autocompletar sugerencias")):
+    """
+    Autocompletado de búsqueda en milisegundos (~30ms) usando el motor de sugerencias.
+    Devuelve lista de sugerencias de canciones y artistas populares.
+    """
+    query = q.strip()
+    if not query:
+        return []
+    try:
+        url = f"https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q={urllib.parse.quote(query)}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=1.8) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if isinstance(data, list) and len(data) > 1 and isinstance(data[1], list):
+                return data[1][:10]
+    except Exception as e:
+        print(f"Error obteniendo sugerencias: {e}")
+    return []
+
 @app.get("/search_online")
-def search_online(q: str = Query(..., description="Nombre de la canción o artista")):
+def search_online(
+    q: str = Query(..., description="Nombre de la canción o artista"),
+    limit: int = Query(25, description="Número de resultados a extraer")
+):
     """
     Busca cualquier canción en YouTube Music con extract_flat=True.
     Responde en ~1 segundo con canciones 100% completas (3 a 5 minutos).
@@ -96,8 +290,9 @@ def search_online(q: str = Query(..., description="Nombre de la canción o artis
     if not query:
         return []
 
+    fetch_limit = min(max(limit, 10), 30)
     try:
-        search_target = f"ytsearch10:{query} audio"
+        search_target = f"ytsearch{fetch_limit}:{query} audio"
         with yt_dlp.YoutubeDL(YDL_FAST_SEARCH_OPTS) as ydl:
             res = ydl.extract_info(search_target, download=False)
             entries = res.get('entries', []) if res else []
@@ -265,7 +460,7 @@ def list_tracks():
         if file_path.suffix.lower() in SUPPORTED_EXTENSIONS:
             clean_name = file_path.stem
             parts = clean_name.split(" - ")
-            artist = parts[0].strip() if len(parts) > 1 else "Diaz Music Local"
+            artist = parts[0].strip() if len(parts) > 1 else "Thomas Music Local"
             title = parts[1].strip() if len(parts) > 1 else clean_name
 
             tracks.append({
@@ -343,7 +538,7 @@ def stream_radio_proxy(url: str):
         req = urllib.request.Request(
             url,
             headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DiazMusic/1.0",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ThomasMusic/1.0",
                 "Icy-MetaData": "0"
             }
         )
@@ -377,7 +572,7 @@ def stream_audio(filename: str, request: Request):
 if __name__ == "__main__":
     import uvicorn
     print("=================================================================")
-    print("🚀 Diaz Music Universal Streamer Activo en http://0.0.0.0:8000")
+    print("🚀 Thomas Music Universal Streamer Activo en http://0.0.0.0:8000")
     print("🎵 Canciones COMPLETAS sin límite de 30 segundos habilitadas")
     print("=================================================================")
     uvicorn.run(app, host="0.0.0.0", port=8000)

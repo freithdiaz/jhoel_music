@@ -1,7 +1,7 @@
 {
-  "name": "Diaz Music • Spotify Clone Studio",
-  "short_name": "Diaz Music",
-  "description": "Clon de Spotify 100% libre y gratuito con DSP de 5 bandas, Audio 8D, Bóveda Offline sin DRM y control total por audífonos e intercomunicador.",
+  "name": "Thomas Music",
+  "short_name": "Thomas Music",
+  "description": "Tu reproductor de música y radio en vivo con ecualizador de 5 bandas, audio 8D y streaming de alta fidelidad.",
   "start_url": "/",
   "id": "/",
   "display": "standalone",
