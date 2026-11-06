@@ -18,6 +18,7 @@ Tailscale gestiona HTTPS para su nombre `*.ts.net`. El contenedor escucha en el 
 - Se aplican límites **globales por proceso** a inicios de sesión, búsquedas y operaciones costosas, un límite de seis operaciones de búsqueda/stream simultáneas y un límite de 2 MiB en cuerpos de API. No se confía en cabeceras de IP: los límites no son por visitante, se reinician con el proceso y un tercero puede agotarlos para todos. Usar exactamente un worker. No sustituyen WAF, límites por usuario, supervisión ni una auditoría de seguridad.
 - Las cuentas existentes pueden tener contraseñas antiguas débiles. Revisa y cambia credenciales comprometidas o débiles antes de publicar. El acceso offline local del navegador no protege los datos frente a una persona con acceso al dispositivo.
 - Funnel tiene límites de ancho de banda, usa nombres `*.ts.net` y solo admite los puertos HTTPS públicos 443, 8443 y 10000. **8589 es el puerto local**, no el puerto público de Funnel. El proveedor de música también puede rechazar solicitudes o cambiar sus condiciones; revisa las licencias antes de ofrecer el servicio públicamente.
+- `yt-dlp` incluye los componentes EJS compatibles y Node para su funcionamiento; esto no resuelve necesariamente una verificación de cuenta o un bloqueo del proveedor. No compartas cookies o tokens de tu cuenta para diagnosticar el servicio.
 - Conserva las descargas, copias de seguridad y el volumen fuera de los directorios públicos. No actives `MUSIC_ENABLE_LOCAL_LIBRARY` en Funnel: esas rutas actualmente no requieren autenticación.
 
 ## 1. Requisitos

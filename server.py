@@ -51,7 +51,8 @@ YDL_FAST_SEARCH_OPTS = {
     'quiet': True,
     'no_warnings': True,
     'noplaylist': True,
-    'skip_download': True
+    'skip_download': True,
+    'js_runtimes': {'node': {}}
 }
 
 # Opciones de extracción de audio individual al reproducir

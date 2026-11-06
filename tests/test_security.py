@@ -37,6 +37,10 @@ class SecurityTests(unittest.TestCase):
         legacy = hashlib.sha256(b"password123").hexdigest()
         self.assertTrue(server.verify_password("password123", legacy))
 
+    def test_node_runtime_is_enabled_for_search_and_stream(self):
+        self.assertIn('node', server.YDL_FAST_SEARCH_OPTS['js_runtimes'])
+        self.assertIn('node', server.YDL_STREAM_OPTS['js_runtimes'])
+
     def test_sessions_protect_user_data_and_can_be_revoked(self):
         alice = server.register(server.RegisterRequest(username="alice", password="password123"))
         server.register(server.RegisterRequest(username="bobby", password="password123"))
