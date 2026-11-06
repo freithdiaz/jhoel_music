@@ -66,3 +66,66 @@ input[type="range"]::-webkit-slider-thumb:hover {
   padding-bottom: calc(5rem + var(--safe-bottom));
 }
 
+/* A compact status strip: the library stays visible even when offline. */
+.sync-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 1rem;
+  background: #17241f;
+  color: #d3e8da;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+.sync-banner__dot { width: 0.45rem; height: 0.45rem; border-radius: 50%; background: #9bdbad; flex: none; }
+.sync-banner__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-left: auto; }
+.sync-banner__actions button { border: 1px solid #628473; border-radius: 999px; padding: 0.25rem 0.65rem; font-weight: 700; }
+.sync-banner__actions button:hover { background: #2d4739; }
+.sync-banner__actions button:disabled { opacity: 0.5; }
+
+.conflict-overlay { position: fixed; inset: 0; z-index: 80; display: flex; align-items: center; justify-content: center; padding: 1rem; background: rgba(3, 8, 6, .78); }
+.conflict-dialog { width: min(100%, 45rem); max-height: min(90dvh, 52rem); overflow-y: auto; border: 1px solid rgba(173, 210, 185, .16); border-radius: 1.25rem; padding: 1.5rem; background: #121a16; color: #eef5ef; }
+.conflict-dialog__heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }
+.conflict-dialog__heading h2 { margin-top: .3rem; font-size: 1.35rem; font-weight: 750; letter-spacing: -.025em; }
+.conflict-dialog__eyebrow { color: #9bd4ab; font-size: .625rem; font-weight: 700; letter-spacing: .12em; }
+.conflict-dialog__close { padding: .375rem; color: #bacbbf; }
+.conflict-dialog__intro, .conflict-dialog__footnote { color: #a8bbb0; font-size: .8rem; line-height: 1.55; }
+.conflict-dialog__intro { margin: .75rem 0 1.25rem; }
+.conflict-versions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .75rem; }
+.conflict-version { min-width: 0; padding: 1rem; border: 1px solid rgba(173, 210, 185, .12); border-radius: .875rem; background: #19231d; }
+.conflict-version__top h3 { font-size: .875rem; font-weight: 700; }
+.conflict-version__top span { display: block; margin-top: .25rem; color: #a8bbb0; font-size: .7rem; }
+.conflict-version ul { max-height: 9rem; overflow-y: auto; margin: .75rem 0; border-top: 1px solid rgba(173, 210, 185, .1); }
+.conflict-version ul > li { padding: .5rem 0; border-bottom: 1px solid rgba(173, 210, 185, .08); color: #dce8df; font-size: .75rem; }
+.conflict-version summary { display: flex; justify-content: space-between; gap: .75rem; cursor: pointer; }
+.conflict-version summary span:first-child { overflow-wrap: anywhere; }
+.conflict-version summary span:last-child { flex-shrink: 0; color: #9cafa1; font-size: .675rem; }
+.conflict-version ol { margin: .5rem 0 0; padding-left: .75rem; border-left: 1px solid rgba(173, 210, 185, .2); }
+.conflict-version ol li, .conflict-version__empty { padding: .25rem 0; color: #cad9ce; font-size: .7rem; overflow-wrap: anywhere; }
+.conflict-version ol li span { color: #9cafa1; }
+.conflict-version button, .conflict-dialog__error button { color: #a5ddb5; font-size: .75rem; font-weight: 700; text-decoration: underline; text-underline-offset: 3px; }
+.conflict-dialog__explanation, .conflict-dialog__notice, .conflict-dialog__error { margin-top: 1rem; padding: .875rem; border-radius: .75rem; background: #202c23; color: #cbdccf; font-size: .75rem; line-height: 1.5; }
+.conflict-dialog__error { background: #35251f; color: #ffd8c5; }
+.conflict-dialog__actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: 1rem; }
+.conflict-dialog__actions button { padding: .65rem .85rem; border: 1px solid rgba(173, 210, 185, .24); border-radius: .625rem; font-size: .75rem; font-weight: 700; }
+.conflict-dialog__actions .conflict-dialog__primary { background: #a5ddb5; border-color: #a5ddb5; color: #102016; }
+.conflict-dialog button:disabled { opacity: .5; }
+.conflict-dialog__footnote { margin-top: .875rem; font-size: .7rem; }
+@media (max-width: 600px) {
+  .conflict-dialog { padding: 1.125rem; }
+  .conflict-versions { grid-template-columns: 1fr; }
+  .conflict-dialog__actions button { flex: 1 1 100%; }
+}
+
+/* Listening room: cover art is the focus; the thin playhead echoes a record groove. */
+.mobile-deck { overflow: hidden; bottom: calc(4rem + var(--safe-bottom)); }
+.mobile-nav { padding-bottom: calc(.375rem + var(--safe-bottom)); }
+.mobile-deck__progress { position: absolute; bottom: 0; left: 0.75rem; right: 0.75rem; height: 2px; background: rgba(255,255,255,.14); }
+.mobile-deck__progress span { display: block; height: 100%; background: #b0edc0; transition: width .2s linear; }
+.listening-room { padding-top: max(1.5rem, env(safe-area-inset-top)); padding-bottom: max(1.5rem, env(safe-area-inset-bottom)); }
+.listening-room h3 { letter-spacing: -.035em; }
+button:focus-visible, [role="button"]:focus-visible, input:focus-visible { outline: 2px solid #a7e8b9; outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) {
+  .mobile-deck__progress span { transition: none; }
+}

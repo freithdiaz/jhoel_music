@@ -1,7 +1,164 @@
 import { UserProfile, UserData, Playlist, Track } from '../types';
+import { mergeUserData } from './syncMerge';
 
 const CURRENT_USER_KEY = 'thomas_music_current_user';
 const LOCAL_ACCOUNTS_KEY = 'thomas_music_local_accounts';
+const SESSION_KEY = 'thomas_music_server_session';
+type SyncState = 'local' | 'pending' | 'syncing' | 'synced' | 'conflict' | 'auth';
+type SyncMeta = { server: string; revision: number | null; dirty: boolean; conflict: boolean };
+const activeSyncs = new Set<string>();
+const metaKey = (u: string) => `thomas_music_sync_${u}`;
+const dataKey = (u: string) => `thomas_music_user_${u}_data`;
+function readMeta(u: string): SyncMeta | null {
+  try { return JSON.parse(localStorage.getItem(metaKey(u)) || 'null'); } catch { return null; }
+}
+function writeMeta(u: string, meta: SyncMeta): void { localStorage.setItem(metaKey(u), JSON.stringify(meta)); }
+function notifySync(state: SyncState): void { window.dispatchEvent(new CustomEvent('music-sync', { detail: state })); }
+function fromServer(data: any): UserData {
+  return { playlists: data.playlists || [], favorites50List: data.favorites || [],
+    userTasteProfile: data.tasteProfile || { favoriteArtists: {}, favoriteGenres: {} } };
+}
+
+export function getSyncState(username: string, server: string): SyncState {
+  const meta = readMeta(username);
+  if (!meta || meta.server !== server) return 'local';
+  if (meta.conflict) return 'conflict';
+  if (meta.dirty && !getServerToken(username, server)) return 'auth';
+  return meta.dirty ? 'pending' : 'synced';
+}
+
+export async function syncUserData(username: string, server: string): Promise<void> {
+  const u = username.toLowerCase();
+  const key = `${server}:${u}`;
+  if (activeSyncs.has(key)) return;
+  const token = getServerToken(u, server);
+  let meta = readMeta(u);
+  if (!meta || meta.server !== server || meta.conflict || !token || meta.revision === null) {
+    notifySync(getSyncState(u, server));
+    return;
+  }
+  activeSyncs.add(key);
+  notifySync('syncing');
+  let retry = false;
+  try {
+    const snapshot = localStorage.getItem(dataKey(u));
+    if (!snapshot) return;
+    if (!meta.dirty) {
+      const res = await fetch(`${server}/user/data/${encodeURIComponent(u)}`, {
+        headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000)
+      });
+      if (res.status === 401) { notifySync('auth'); return; }
+      if (!res.ok) { notifySync('pending'); return; }
+      const remote = await res.json();
+      if (!Number.isInteger(remote.revision)) { notifySync('pending'); return; }
+      const latest = readMeta(u);
+      if (latest?.server === server && !latest.dirty && !latest.conflict && latest.revision === meta.revision && localStorage.getItem(dataKey(u)) === snapshot && remote.revision !== meta.revision) {
+        if (remote.revision < meta.revision) {
+          // La base del servidor pudo restaurarse o cambiar; nunca descartar la copia local.
+          writeMeta(u, { ...latest, dirty: true, conflict: true });
+          notifySync('conflict');
+          return;
+        }
+        const data = fromServer(remote);
+        localStorage.setItem(dataKey(u), JSON.stringify(data));
+        writeMeta(u, { ...latest, revision: remote.revision });
+        window.dispatchEvent(new CustomEvent('music-sync-data', { detail: { username: u, server, data } }));
+      }
+      retry = !!readMeta(u)?.dirty && !readMeta(u)?.conflict;
+      notifySync(retry ? 'pending' : getSyncState(u, server));
+      return;
+    }
+    const data: UserData = JSON.parse(snapshot);
+    const res = await fetch(`${server}/user/sync`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ username: u, base_revision: meta.revision, playlists: data.playlists,
+        favorites: data.favorites50List, taste_profile: data.userTasteProfile }),
+      signal: AbortSignal.timeout(5000)
+    });
+    meta = readMeta(u);
+    if (!meta || meta.server !== server) return;
+    if (res.status === 409) {
+      writeMeta(u, { ...meta, conflict: true });
+      notifySync('conflict');
+    } else if (res.status === 401) {
+      notifySync('auth');
+    } else if (!res.ok) {
+      notifySync('pending');
+    } else {
+      const result = await res.json();
+      const dirty = localStorage.getItem(dataKey(u)) !== snapshot;
+      writeMeta(u, { ...meta, revision: result.revision, dirty });
+      retry = dirty;
+      notifySync(dirty ? 'pending' : 'synced');
+    }
+  } catch {
+    notifySync('pending');
+  } finally {
+    activeSyncs.delete(key);
+    if (retry) void syncUserData(u, server);
+  }
+}
+
+export interface ConflictPreview {
+  username: string;
+  server: string;
+  local: UserData;
+  localSnapshot: string;
+  remote: UserData;
+  revision: number;
+}
+
+async function fetchConflictRemote(username: string, server: string): Promise<{ data: UserData; revision: number }> {
+  const token = getServerToken(username, server);
+  if (!token) throw new Error('Inicia sesión para resolver el conflicto');
+  const res = await fetch(`${server}/user/data/${encodeURIComponent(username)}`, {
+    headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5000)
+  });
+  if (!res.ok) throw new Error(res.status === 401 ? 'La sesión venció. Inicia sesión de nuevo.' : 'No se pudieron consultar los datos del servidor');
+  const remote = await res.json();
+  if (!Number.isInteger(remote.revision)) throw new Error('El servidor no devolvió una versión válida');
+  return { data: fromServer(remote), revision: remote.revision };
+}
+
+export async function getConflictPreview(username: string, server: string): Promise<ConflictPreview> {
+  const u = username.toLowerCase();
+  const remote = await fetchConflictRemote(u, server);
+  const localSnapshot = localStorage.getItem(dataKey(u));
+  if (!localSnapshot) throw new Error('No se encontraron los datos locales para comparar');
+  return { username: u, server, local: JSON.parse(localSnapshot), localSnapshot, remote: remote.data, revision: remote.revision };
+}
+
+export async function resolveSyncConflict(username: string, server: string, choice: 'local' | 'server' | 'merge', preview: ConflictPreview): Promise<UserData | null> {
+  const u = username.toLowerCase();
+  if (preview.username !== u || preview.server !== server || localStorage.getItem(dataKey(u)) !== preview.localSnapshot) {
+    throw new Error('Los datos de este dispositivo cambiaron. Actualiza la comparación antes de continuar.');
+  }
+  const remote = await fetchConflictRemote(u, server);
+  if (remote.revision !== preview.revision || localStorage.getItem(dataKey(u)) !== preview.localSnapshot) {
+    throw new Error('Los datos cambiaron mientras comparabas. Actualiza la comparación antes de continuar.');
+  }
+  const data = choice === 'server' ? remote.data : choice === 'merge' ? mergeUserData(preview.local, remote.data) : preview.local;
+  // Si no cabe la copia, no se sobrescribe ninguna de las versiones.
+  const backupId = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  localStorage.setItem(`thomas_music_sync_backup_${u}_${backupId}`, JSON.stringify({ savedAt: Date.now(), local: preview.local, server: remote.data }));
+  if (choice !== 'local') localStorage.setItem(dataKey(u), JSON.stringify(data));
+  const dirty = choice !== 'server';
+  writeMeta(u, { server, revision: remote.revision, dirty, conflict: false });
+  notifySync(dirty ? 'pending' : 'synced');
+  if (dirty) void syncUserData(u, server);
+  return choice === 'local' ? null : data;
+}
+
+function storeServerSession(username: string, server: string, token: string): void {
+  localStorage.setItem(SESSION_KEY, JSON.stringify({ username, server, token }));
+}
+
+function getServerToken(username: string, server: string): string | null {
+  try {
+    const session = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+    return session?.username === username && session?.server === server ? session.token : null;
+  } catch { return null; }
+}
 
 // Helper de hash simple para almacenamiento local offline
 function simpleHash(str: string): string {
@@ -27,7 +184,15 @@ export function setCurrentUser(user: UserProfile | null): void {
     if (user) {
       localStorage.setItem(CURRENT_USER_KEY, JSON.stringify(user));
     } else {
+      const session = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
+      if (session?.server && session?.token) {
+        fetch(`${session.server}/auth/logout`, {
+          method: 'POST', headers: { Authorization: `Bearer ${session.token}` },
+          signal: AbortSignal.timeout(3000)
+        }).catch(() => {});
+      }
       localStorage.removeItem(CURRENT_USER_KEY);
+      localStorage.removeItem(SESSION_KEY);
     }
   } catch {}
 }
@@ -59,27 +224,19 @@ export function getLocalUserData(username: string): UserData {
 export function saveLocalUserData(username: string, data: UserData, fastApiUrl?: string): void {
   const u = username.toLowerCase();
   try {
-    localStorage.setItem(`thomas_music_user_${u}_data`, JSON.stringify(data));
+    const serialized = JSON.stringify(data);
+    const previous = localStorage.getItem(dataKey(u));
+    localStorage.setItem(dataKey(u), serialized);
+    if (fastApiUrl && u !== 'invitado' && previous !== serialized) {
+      const existing = readMeta(u);
+      const meta = existing?.server === fastApiUrl ? existing : { server: fastApiUrl, revision: null, dirty: false, conflict: false };
+      writeMeta(u, { ...meta, dirty: true });
+    }
   } catch (err) {
     console.warn('Error guardando datos de usuario local:', err);
+    return;
   }
-
-  // Sincronizar en segundo plano con el servidor backend si está conectado
-  if (fastApiUrl) {
-    fetch(`${fastApiUrl}/user/sync`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        username: u,
-        playlists: data.playlists,
-        favorites: data.favorites50List,
-        taste_profile: data.userTasteProfile
-      }),
-      signal: AbortSignal.timeout(3000)
-    }).catch(() => {
-      // Sincronización silenciosa si el servidor está apagado
-    });
-  }
+  if (fastApiUrl && u !== 'invitado') void syncUserData(u, fastApiUrl);
 }
 
 // Iniciar sesión (Intenta Servidor Backend + Fallback Offline Local)
@@ -106,18 +263,21 @@ export async function loginUser(
       });
       if (res.ok) {
         const json = await res.json();
+        storeServerSession(u, fastApiUrl, json.token);
         const user: UserProfile = json.user;
-        const serverData: UserData = {
-          playlists: json.data?.playlists || [],
-          favorites50List: json.data?.favorites || [],
-          userTasteProfile: json.data?.tasteProfile || { favoriteArtists: {}, favoriteGenres: {} }
-        };
+        const serverData = fromServer(json.data || {});
+        const meta = readMeta(u);
+        const localRaw = localStorage.getItem(dataKey(u));
+        const hasPending = !!localRaw && (meta?.server !== fastApiUrl || meta.dirty);
+        const conflict = hasPending && (meta?.server !== fastApiUrl || meta.revision !== json.data.revision);
+        const data = hasPending ? JSON.parse(localRaw) as UserData : serverData;
+        writeMeta(u, { server: fastApiUrl, revision: hasPending && meta?.server === fastApiUrl ? meta.revision : json.data.revision, dirty: hasPending, conflict });
 
         // Cachear cuenta y datos localmente
         setCurrentUser(user);
-        saveLocalUserData(u, serverData);
+        localStorage.setItem(dataKey(u), JSON.stringify(data));
         saveLocalAccountCredentials(u, p, user.displayName);
-        return { user, data: serverData };
+        return { user, data };
       } else if (res.status === 401) {
         const errJson = await res.json().catch(() => ({}));
         throw new Error(errJson.detail || 'Usuario o contraseña incorrectos');
@@ -161,7 +321,7 @@ export async function registerUser(
   const name = displayName.trim() || u;
 
   if (u.length < 3) throw new Error('El usuario debe tener al menos 3 caracteres');
-  if (p.length < 4) throw new Error('La contraseña debe tener al menos 4 caracteres');
+  if (p.length < 8) throw new Error('La contraseña debe tener al menos 8 caracteres');
 
   // 1. Probar Servidor Backend si está disponible
   if (fastApiUrl) {
@@ -174,6 +334,7 @@ export async function registerUser(
       });
       if (res.ok) {
         const json = await res.json();
+        storeServerSession(u, fastApiUrl, json.token);
         const user: UserProfile = json.user;
         const initialData: UserData = {
           playlists: [
@@ -191,6 +352,7 @@ export async function registerUser(
         };
 
         setCurrentUser(user);
+        writeMeta(u, { server: fastApiUrl, revision: 0, dirty: false, conflict: false });
         saveLocalUserData(u, initialData, fastApiUrl);
         saveLocalAccountCredentials(u, p, name);
         return { user, data: initialData };
@@ -272,4 +434,3 @@ function saveLocalAccountCredentials(username: string, pass: string, displayName
     localStorage.setItem(LOCAL_ACCOUNTS_KEY, JSON.stringify(filtered));
   } catch {}
 }
-

@@ -9,13 +9,19 @@ import time
 import mimetypes
 import urllib.request
 import urllib.parse
+import urllib.error
 import json
 import sqlite3
 import hashlib
+import hmac
+import secrets
+import re
+import threading
+from contextlib import closing
 from pathlib import Path
 from typing import List, Optional, Dict
 from pydantic import BaseModel
-from fastapi import FastAPI, HTTPException, Request, status, Query
+from fastapi import FastAPI, HTTPException, Request, status, Query, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
@@ -24,8 +30,8 @@ app = FastAPI(title="Thomas Music Universal Streamer", version="2.7.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[origin.strip() for origin in os.environ.get("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["Content-Range", "Content-Length", "Accept-Ranges"]
@@ -37,6 +43,7 @@ SUPPORTED_EXTENSIONS = {".mp3", ".flac", ".wav", ".m4a", ".ogg"}
 
 # Cache en memoria para URLs de streaming de YouTube para que el seek y los saltos sean instantáneos
 STREAM_CACHE: Dict[str, tuple] = {}
+STREAM_LOCKS = [threading.Lock() for _ in range(64)]
 
 # Opciones ultrarrápidas de búsqueda: extract_flat=True (responde en ~1 segundo en vez de 19s)
 YDL_FAST_SEARCH_OPTS = {
@@ -49,7 +56,7 @@ YDL_FAST_SEARCH_OPTS = {
 
 # Opciones de extracción de audio individual al reproducir
 YDL_STREAM_OPTS = {
-    'format': 'bestaudio/m4a/best',
+    'format': 'bestaudio[ext=m4a]/bestaudio/best',
     'noplaylist': True,
     'quiet': True,
     'no_warnings': True,
@@ -58,27 +65,37 @@ YDL_STREAM_OPTS = {
 }
 
 def get_stream_url(video_id: str) -> str:
-    now = time.time()
-    if video_id in STREAM_CACHE:
-        cached_url, expiry = STREAM_CACHE[video_id]
-        if now < expiry:
-            return cached_url
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise ValueError("ID de video no válido")
+    with STREAM_LOCKS[hash(video_id) % len(STREAM_LOCKS)]:
+        now = time.time()
+        if video_id in STREAM_CACHE:
+            cached_url, expiry = STREAM_CACHE[video_id]
+            if now < expiry:
+                return cached_url
 
-    target = f"https://www.youtube.com/watch?v={video_id}"
-    with yt_dlp.YoutubeDL(YDL_STREAM_OPTS) as ydl:
-        info = ydl.extract_info(target, download=False)
-        url = info.get('url')
-        if not url:
-            raise ValueError("No se pudo obtener el stream de audio")
+        target = f"https://www.youtube.com/watch?v={video_id}"
+        with yt_dlp.YoutubeDL(YDL_STREAM_OPTS) as ydl:
+            info = ydl.extract_info(target, download=False)
+            url = info.get('url')
+            if not url:
+                raise ValueError("No se pudo obtener el stream de audio")
 
-        # Guardar en cache por 4 horas
-        STREAM_CACHE[video_id] = (url, now + 14400)
-        return url
+            if len(STREAM_CACHE) >= 256:
+                STREAM_CACHE.pop(next(iter(STREAM_CACHE)))
+            STREAM_CACHE[video_id] = (url, time.time() + 14400)
+            return url
+
+def invalidate_stream_url(video_id: str, rejected_url: str):
+    with STREAM_LOCKS[hash(video_id) % len(STREAM_LOCKS)]:
+        cached = STREAM_CACHE.get(video_id)
+        if cached and cached[0] == rejected_url:
+            STREAM_CACHE.pop(video_id, None)
 
 # ==========================================
 # BASE DE DATOS SQLITE: USUARIOS Y DATOS
 # ==========================================
-DB_PATH = Path("./diaz_music_users.db")
+DB_PATH = Path(os.environ.get("MUSIC_DB_PATH", "./diaz_music_users.db"))
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -101,13 +118,52 @@ def init_db():
             updated_at REAL NOT NULL
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            token_hash TEXT PRIMARY KEY,
+            username TEXT NOT NULL,
+            expires_at REAL NOT NULL
+        )
+    """)
+    if "revision" not in {row[1] for row in cursor.execute("PRAGMA table_info(user_data)")}:
+        cursor.execute("ALTER TABLE user_data ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     conn.close()
 
 init_db()
 
 def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), 600000).hex()
+    return f"pbkdf2_sha256$600000${salt}${digest}"
+
+def verify_password(password: str, stored: str) -> bool:
+    if not stored.startswith("pbkdf2_sha256$"):
+        return hmac.compare_digest(stored, hashlib.sha256(password.encode()).hexdigest())
+    try:
+        _, iterations, salt, expected = stored.split("$")
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(salt), int(iterations)).hex()
+        return hmac.compare_digest(actual, expected)
+    except (ValueError, TypeError):
+        return False
+
+def create_session(conn, username: str) -> str:
+    token = secrets.token_urlsafe(32)
+    conn.execute("DELETE FROM sessions WHERE expires_at < ?", (time.time(),))
+    conn.execute("INSERT INTO sessions VALUES (?, ?, ?)",
+                 (hashlib.sha256(token.encode()).hexdigest(), username, time.time() + 7 * 86400))
+    conn.commit()
+    return token
+
+def require_user(authorization: Optional[str]) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Sesión requerida")
+    token_hash = hashlib.sha256(authorization[7:].encode()).hexdigest()
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        row = conn.execute("SELECT username FROM sessions WHERE token_hash = ? AND expires_at > ?", (token_hash, time.time())).fetchone()
+    if not row:
+        raise HTTPException(status_code=401, detail="Sesión inválida o vencida")
+    return row[0]
 
 class RegisterRequest(BaseModel):
     username: str
@@ -120,6 +176,7 @@ class LoginRequest(BaseModel):
 
 class UserSyncRequest(BaseModel):
     username: str
+    base_revision: int
     playlists: list = []
     favorites: list = []
     taste_profile: dict = {}
@@ -133,8 +190,8 @@ def register(req: RegisterRequest):
     p = req.password.strip()
     if not u or len(u) < 3:
         raise HTTPException(status_code=400, detail="El nombre de usuario debe tener al menos 3 caracteres")
-    if not p or len(p) < 4:
-        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 4 caracteres")
+    if len(p) < 8:
+        raise HTTPException(status_code=400, detail="La contraseña debe tener al menos 8 caracteres")
 
     name = (req.display_name or u).strip()
     conn = sqlite3.connect(DB_PATH)
@@ -156,6 +213,7 @@ def register(req: RegisterRequest):
         conn.commit()
         return {
             "status": "success",
+            "token": create_session(conn, u),
             "user": {
                 "id": user_id,
                 "username": u,
@@ -175,10 +233,14 @@ def login(req: LoginRequest):
     try:
         cursor.execute("SELECT id, username, password_hash, display_name, created_at FROM users WHERE username = ?", (u,))
         row = cursor.fetchone()
-        if not row or row[2] != hash_password(p):
+        if not row or not verify_password(p, row[2]):
             raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
 
-        cursor.execute("SELECT playlists, favorites, taste_profile FROM user_data WHERE username = ?", (u,))
+        if not row[2].startswith("pbkdf2_sha256$"):
+            cursor.execute("UPDATE users SET password_hash = ? WHERE username = ?", (hash_password(p), u))
+            conn.commit()
+
+        cursor.execute("SELECT playlists, favorites, taste_profile, revision FROM user_data WHERE username = ?", (u,))
         data_row = cursor.fetchone()
         playlists = json.loads(data_row[0]) if data_row and data_row[0] else []
         favorites = json.loads(data_row[1]) if data_row and data_row[1] else []
@@ -186,6 +248,7 @@ def login(req: LoginRequest):
 
         return {
             "status": "success",
+            "token": create_session(conn, u),
             "user": {
                 "id": row[0],
                 "username": row[1],
@@ -195,50 +258,59 @@ def login(req: LoginRequest):
             "data": {
                 "playlists": playlists,
                 "favorites": favorites,
-                "tasteProfile": taste_profile
+                "tasteProfile": taste_profile,
+                "revision": data_row[3] if data_row else 0
             }
         }
     finally:
         conn.close()
 
 @app.post("/user/sync")
-def sync_user_data(req: UserSyncRequest):
+def sync_user_data(req: UserSyncRequest, authorization: Optional[str] = Header(default=None)):
     u = req.username.strip().lower()
+    if require_user(authorization) != u:
+        raise HTTPException(status_code=403, detail="Acceso denegado")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT id FROM users WHERE username = ?", (u,))
-        if not cursor.fetchone():
-            raise HTTPException(status_code=404, detail="Usuario no encontrado")
-
         cursor.execute("""
-            INSERT INTO user_data (username, playlists, favorites, taste_profile, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(username) DO UPDATE SET
-                playlists = excluded.playlists,
-                favorites = excluded.favorites,
-                taste_profile = excluded.taste_profile,
-                updated_at = excluded.updated_at
-        """, (u, json.dumps(req.playlists), json.dumps(req.favorites), json.dumps(req.taste_profile), time.time()))
+            UPDATE user_data SET playlists = ?, favorites = ?, taste_profile = ?,
+                updated_at = ?, revision = revision + 1
+            WHERE username = ? AND revision = ?
+        """, (json.dumps(req.playlists), json.dumps(req.favorites), json.dumps(req.taste_profile), time.time(), u, req.base_revision))
+        if cursor.rowcount != 1:
+            raise HTTPException(status_code=409, detail="Los datos cambiaron en otro dispositivo")
         conn.commit()
-        return {"status": "synced", "updated_at": time.time()}
+        return {"status": "synced", "revision": req.base_revision + 1}
     finally:
         conn.close()
 
+@app.post("/auth/logout")
+def logout(authorization: Optional[str] = Header(default=None)):
+    require_user(authorization)
+    token_hash = hashlib.sha256(authorization[7:].encode()).hexdigest()
+    with closing(sqlite3.connect(DB_PATH)) as conn:
+        conn.execute("DELETE FROM sessions WHERE token_hash = ?", (token_hash,))
+        conn.commit()
+    return {"status": "logged_out"}
+
 @app.get("/user/data/{username}")
-def get_user_data(username: str):
+def get_user_data(username: str, authorization: Optional[str] = Header(default=None)):
     u = username.strip().lower()
+    if require_user(authorization) != u:
+        raise HTTPException(status_code=403, detail="Acceso denegado")
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT playlists, favorites, taste_profile FROM user_data WHERE username = ?", (u,))
+        cursor.execute("SELECT playlists, favorites, taste_profile, revision FROM user_data WHERE username = ?", (u,))
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Datos no encontrados")
         return {
             "playlists": json.loads(row[0]),
             "favorites": json.loads(row[1]),
-            "tasteProfile": json.loads(row[2])
+            "tasteProfile": json.loads(row[2]),
+            "revision": row[3]
         }
     finally:
         conn.close()
@@ -347,6 +419,15 @@ def search_online(
 # ==========================================
 # 2. PROXY DE STREAMING EN VIVO (CANCIONES COMPLETAS)
 # ==========================================
+@app.get("/prepare_stream")
+def prepare_stream(v: str = Query(..., min_length=11, max_length=11, pattern=r"^[A-Za-z0-9_-]{11}$")):
+    """Prepara solo el enlace de la siguiente pista; no descarga el audio."""
+    try:
+        get_stream_url(v)
+        return {"status": "ready"}
+    except Exception:
+        raise HTTPException(status_code=502, detail="No se pudo preparar la pista")
+
 @app.get("/stream_yt")
 def stream_yt(request: Request, v: str = Query(..., description="ID del video de YouTube")):
     """
@@ -372,7 +453,16 @@ def stream_yt(request: Request, v: str = Query(..., description="ID del video de
 
     try:
         upstream_req = urllib.request.Request(stream_url, headers=req_headers)
-        upstream_resp = urllib.request.urlopen(upstream_req, timeout=12)
+        try:
+            upstream_resp = urllib.request.urlopen(upstream_req, timeout=12)
+        except urllib.error.HTTPError as err:
+            if err.code not in (403, 410):
+                raise
+            err.close()
+            invalidate_stream_url(v, stream_url)
+            stream_url = get_stream_url(v)
+            upstream_req = urllib.request.Request(stream_url, headers=req_headers)
+            upstream_resp = urllib.request.urlopen(upstream_req, timeout=12)
 
         def iter_chunks():
             try:
@@ -406,7 +496,7 @@ def stream_yt(request: Request, v: str = Query(..., description="ID del video de
         )
     except Exception as e:
         print(f"Error transmitiendo datos del stream: {e}")
-        raise HTTPException(status_code=502, detail=f"Error en streaming de audio: {e}")
+        raise HTTPException(status_code=502, detail="La fuente de audio no está disponible")
 
 # ==========================================
 # 3. RESOLVER ENLACES DE SPOTIFY A CANCIONES COMPLETAS
@@ -530,37 +620,8 @@ def send_partial_file(request: Request, path: Path):
 
 @app.get("/stream_radio")
 def stream_radio_proxy(url: str):
-    """
-    Proxy de Radio en Vivo universal (MP3 / Icecast / Shoutcast)
-    Garantiza streaming ininterrumpido sin restricciones CORS en celulares y navegadores.
-    """
-    def iter_stream():
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ThomasMusic/1.0",
-                "Icy-MetaData": "0"
-            }
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                while True:
-                    chunk = resp.read(16 * 1024)
-                    if not chunk:
-                        break
-                    yield chunk
-        except Exception as e:
-            print("Error en stream_radio_proxy:", e)
-
-    return StreamingResponse(
-        iter_stream(),
-        media_type="audio/mpeg",
-        headers={
-            "Access-Control-Allow-Origin": "*",
-            "Cache-Control": "no-cache, no-store",
-            "Pragma": "no-cache"
-        }
-    )
+    # Un proxy abierto permite acceder a servicios internos (SSRF).
+    raise HTTPException(status_code=403, detail="Proxy de radio deshabilitado por seguridad")
 
 @app.get("/stream/{filename}")
 def stream_audio(filename: str, request: Request):
@@ -572,7 +633,7 @@ def stream_audio(filename: str, request: Request):
 if __name__ == "__main__":
     import uvicorn
     print("=================================================================")
-    print("🚀 Thomas Music Universal Streamer Activo en http://0.0.0.0:8000")
+    print(f"🚀 Thomas Music Universal Streamer Activo en http://{os.environ.get('MUSIC_HOST', '127.0.0.1')}:8000")
     print("🎵 Canciones COMPLETAS sin límite de 30 segundos habilitadas")
     print("=================================================================")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=os.environ.get("MUSIC_HOST", "127.0.0.1"), port=8000)

@@ -18,7 +18,12 @@ import {
   loginUser,
   registerUser,
   getLocalUserData,
-  saveLocalUserData
+  saveLocalUserData,
+  getSyncState,
+  syncUserData,
+  resolveSyncConflict,
+  getConflictPreview,
+  ConflictPreview
 } from './services/authService';
 import {
   updateMediaSessionMetadata,
@@ -34,6 +39,9 @@ import {
   exportDrmFreeFile
 } from './services/offlineVault';
 import { fetchTrendingFreeTracks, searchFreeMusicOnline, fetchSearchSuggestions } from './services/freeMusicApi';
+import { rankRelated, recommendationQuery, relatedReason, trackGenre } from './services/recommendations';
+import { playbackUrl } from './services/playbackUrl';
+import { createPlaybackQueue, stepPlaybackQueue, PlaybackQueue } from './services/playbackQueue';
 import { resolveSpotifyTrackViaRea } from './services/reaBridge';
 import {
   getStoredJamendoClientId,
@@ -296,9 +304,25 @@ export default function App() {
   // ==========================================
   // ESTADOS PRINCIPALES DE LA APLICACIÓN
   // ==========================================
-  const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
+  const [tracks, setTracks] = useState<Track[]>([]);
+  const [offlineTracks, setOfflineTracks] = useState<Track[]>([]);
+  const offlineTracksRef = useRef<Track[]>([]);
+  const [vaultReady, setVaultReady] = useState(false);
+  const vaultBusyRef = useRef(false);
+  const [isOnline, setIsOnline] = useState(() => navigator.onLine);
+  const updateOfflineTracks = (next: Track[]) => { offlineTracksRef.current = next; setOfflineTracks(next); };
+  const isDownloaded = (id: string) => offlineTracks.some(track => track.id === id);
+  const homeOrderRef = useRef<{ scope: string; ids: string[]; tracks: Map<string, Track> }>({ scope: '', ids: [], tracks: new Map() });
   const [currentTrackIndex, setCurrentTrackIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isBuffering, setIsBuffering] = useState(false);
+  const [playbackQueue, setPlaybackQueue] = useState<PlaybackQueue | null>(null);
+  const playbackQueueRef = useRef<PlaybackQueue | null>(null);
+  const updatePlaybackQueue = (queue: PlaybackQueue | null) => {
+    playbackQueueRef.current = queue;
+    setPlaybackQueue(queue);
+  };
+  const playbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(172);
   const [volume, setVolume] = useState(0.85);
@@ -342,9 +366,10 @@ export default function App() {
   const [homeCurrentPage, setHomeCurrentPage] = useState(1);
   const HOME_PAGE_SIZE = 10;
 
-  // Servidor FastAPI Local (Auto-detección según el host)
-  const defaultHost = typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : 'localhost';
-  const [fastApiUrl, setFastApiUrl] = useState(`http://${defaultHost}:8000`);
+  // En desarrollo Vite proporciona /api; en producción el servidor web debe enviarlo a FastAPI.
+  const [fastApiUrl, setFastApiUrl] = useState(
+    new URL(import.meta.env.VITE_API_BASE_URL || '/api', window.location.origin).href.replace(/\/$/, '')
+  );
   const [serverStatus, setServerStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
 
   // ==========================================
@@ -359,6 +384,11 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+  const [syncStatus, setSyncStatus] = useState('local');
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [conflictOpen, setConflictOpen] = useState(false);
+  const [conflictPreview, setConflictPreview] = useState<ConflictPreview | null>(null);
+  const [conflictError, setConflictError] = useState('');
 
   // Inicializar datos del usuario actual (o invitado)
   const initialUserData = useMemo(() => {
@@ -384,7 +414,17 @@ export default function App() {
     favoriteGenres: Record<string, number>;
   }>(() => initialUserData.userTasteProfile);
 
-  const listened50TrackIdsRef = useRef<Set<string>>(new Set());
+  const listeningRef = useRef({ trackId: '', lastTime: 0, lastWall: 0, listened: 0, counted: false });
+  const recentTracksRef = useRef<Track[]>([]);
+  const nextRequestRef = useRef(0);
+  const relatedRequestRef = useRef<{ trackId: string; promise: Promise<Track[]> } | null>(null);
+  const hasSelectedMusicRef = useRef(false);
+  const [musicSelection, setMusicSelection] = useState(0);
+  const [relatedTracks, setRelatedTracks] = useState<Track[]>([]);
+  const [regionalTracks, setRegionalTracks] = useState<Track[]>([]);
+  const [regionalLoading, setRegionalLoading] = useState(true);
+  const [personalTracks, setPersonalTracks] = useState<Track[]>([]);
+  const [musicRegion, setMusicRegion] = useState(() => localStorage.getItem('thomas_music_region') || 'CO');
 
   // Guardar datos del usuario activo en cada cambio
   useEffect(() => {
@@ -392,11 +432,83 @@ export default function App() {
     saveLocalUserData(u, { playlists, favorites50List, userTasteProfile }, fastApiUrl);
   }, [playlists, favorites50List, userTasteProfile, currentUser, fastApiUrl]);
 
+  useEffect(() => {
+    if (!currentUser) { setSyncStatus('local'); return; }
+    const username = currentUser.username;
+    const refresh = () => { setSyncStatus(getSyncState(username, fastApiUrl)); void syncUserData(username, fastApiUrl); };
+    const onStatus = (event: Event) => setSyncStatus((event as CustomEvent<string>).detail);
+    const onData = (event: Event) => {
+      const detail = (event as CustomEvent<{ username: string; server: string; data: UserData }>).detail;
+      if (detail.username !== username || detail.server !== fastApiUrl) return;
+      setPlaylists(detail.data.playlists);
+      setFavorites50List(detail.data.favorites50List);
+      setUserTasteProfile(detail.data.userTasteProfile);
+    };
+    window.addEventListener('music-sync', onStatus);
+    window.addEventListener('music-sync-data', onData);
+    window.addEventListener('online', refresh);
+    refresh();
+    const timer = window.setInterval(refresh, 30000);
+    return () => { window.removeEventListener('music-sync', onStatus); window.removeEventListener('music-sync-data', onData); window.removeEventListener('online', refresh); window.clearInterval(timer); };
+  }, [currentUser?.username, fastApiUrl]);
+
+  const loadConflictPreview = async () => {
+    if (!currentUser) return;
+    setSyncBusy(true);
+    setConflictError('');
+    setConflictPreview(null);
+    try {
+      setConflictPreview(await getConflictPreview(currentUser.username, fastApiUrl));
+    } catch (error: any) { setConflictError(error.message || 'No se pudieron comparar las versiones'); }
+    finally { setSyncBusy(false); }
+  };
+
+  const handleResolveSync = async (choice: 'local' | 'server' | 'merge') => {
+    if (!currentUser || !conflictPreview) return;
+    const localNow = JSON.stringify({ playlists, favorites50List, userTasteProfile });
+    if (localNow !== conflictPreview.localSnapshot) {
+      setConflictError('Los datos de este dispositivo cambiaron. Actualiza la comparación antes de continuar.');
+      return;
+    }
+    const message = choice === 'local'
+      ? '¿Reemplazar la biblioteca del servidor con la de este dispositivo?'
+      : choice === 'server'
+        ? '¿Reemplazar la biblioteca de este dispositivo con la del servidor?'
+        : '¿Conservar ambas versiones? Las playlists con cambios distintos se duplicarán y algunas canciones borradas podrían reaparecer.';
+    if (!window.confirm(message)) return;
+    setSyncBusy(true);
+    setConflictError('');
+    try {
+      const data = await resolveSyncConflict(currentUser.username, fastApiUrl, choice, conflictPreview);
+      if (data) {
+        setPlaylists(data.playlists);
+        setFavorites50List(data.favorites50List);
+        setUserTasteProfile(data.userTasteProfile);
+      }
+      setConflictOpen(false);
+      setConflictPreview(null);
+      showToast(choice === 'server' ? 'Biblioteca del servidor cargada' : 'Cambios preparados para sincronizar');
+    } catch (error: any) { setConflictError(error.message || 'No se pudo resolver el conflicto'); }
+    finally { setSyncBusy(false); }
+  };
+
+  const downloadConflictCopy = (data: UserData, label: string) => {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `diaz-music-${label}.json`;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
   // Modal para configuración de Servidor
   const [showServerModal, setShowServerModal] = useState(false);
 
   // Métodos de autenticación
   const applyLoadedUserData = (user: UserProfile | null, data?: UserData) => {
+    updatePlaybackQueue(null);
+    recentTracksRef.current = [];
+    listeningRef.current = { trackId: '', lastTime: 0, lastWall: 0, listened: 0, counted: false };
     setCurrentUser(user);
     saveSessionUser(user);
     const uData = data || getLocalUserData(user ? user.username : 'invitado');
@@ -470,19 +582,13 @@ export default function App() {
   const [loopB, setLoopB] = useState<number | null>(null);
 
   // Algoritmo IA
-  const [algoEnergyTarget, setAlgoEnergyTarget] = useState(75);
-  const [algoAcousticTarget, setAlgoAcousticTarget] = useState(30);
-  const [algoBpmTarget, setAlgoBpmTarget] = useState(120);
+  const algoEnergyTarget = 75;
+  const algoAcousticTarget = 30;
+  const algoBpmTarget = 120;
   const [autoRadioEnabled, setAutoRadioEnabled] = useState(true);
-  const [scrobbleHistory, setScrobbleHistory] = useState([
-    { title: 'Midnight Cyberpunk Drive', artist: 'The Synthwave Collective', time: 'Hace 3 min', match: 98 },
-    { title: 'Tokyo Drift Phonk 99', artist: 'Kaito Shadow', time: 'Hace 8 min', match: 94 }
-  ]);
 
   // Timestamp Notes
-  const [trackNotes, setTrackNotes] = useState<Record<string, { time: number; note: string }[]>>({
-    'track-1': [{ time: 75, note: '¡Este drop con el preset Bass Boost en audífonos suena brutal!' }]
-  });
+  const [trackNotes, setTrackNotes] = useState<Record<string, { time: number; note: string }[]>>({});
   const [newNoteText, setNewNoteText] = useState('');
 
   // Jamendo Music Integration (Canciones completas sin 30s)
@@ -579,6 +685,9 @@ export default function App() {
 
   // Sintonizar emisora de radio con 0 cortes (Sin mezclar con la lista de canciones)
   const playRadioStation = (station: Track) => {
+    updatePlaybackQueue(null);
+    nextRequestRef.current++;
+    setIsBuffering(false);
     setUseSynthFallback(false);
     setActiveAudioSource('radio');
     setCurrentRadioStation(station);
@@ -647,7 +756,10 @@ export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const synthIntervalRef = useRef<any>(null);
 
-  const currentMusicTrack = tracks[currentTrackIndex] || tracks[0] || INITIAL_TRACKS[0];
+  const currentMusicTrack = tracks[currentTrackIndex] || tracks[0] || {
+    ...INITIAL_TRACKS[0], id: 'empty', title: 'Elige una canción', artist: '', album: '',
+    audioUrl: '', coverUrl: '/icons/icon.svg', cachedOffline: false, liked: false, lyrics: []
+  };
   const currentTrack = activeAudioSource === 'radio' ? currentRadioStation : currentMusicTrack;
 
   const showToast = (msg: string) => {
@@ -655,15 +767,59 @@ export default function App() {
     setTimeout(() => setNotification(null), 3800);
   };
 
+  useEffect(() => {
+    const update = () => setIsOnline(navigator.onLine);
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    return () => { window.removeEventListener('online', update); window.removeEventListener('offline', update); };
+  }, []);
+
+  // Prefetch suggestions without changing the song chosen by the listener.
+  useEffect(() => {
+    if (!autoRadioEnabled || activeAudioSource !== 'music' || !hasSelectedMusicRef.current) return;
+    let cancelled = false;
+    setRelatedTracks([]);
+    const query = recommendationQuery(currentMusicTrack, recentTracksRef.current.slice(-5).map(t => t.artist));
+    const genre = trackGenre(currentMusicTrack);
+    const request = { trackId: currentMusicTrack.id, promise: searchFreeMusicOnline(query, fastApiUrl).then(results =>
+      query === `${genre} musica` ? results.map(track => trackGenre(track) ? track : { ...track, genre }) : results
+    ).catch(() => [] as Track[]) };
+    relatedRequestRef.current = request;
+    request.promise.then(results => {
+      if (!cancelled) setRelatedTracks(results);
+    });
+    return () => { cancelled = true; if (relatedRequestRef.current === request) relatedRequestRef.current = null; };
+  }, [currentMusicTrack.id, musicSelection, autoRadioEnabled, activeAudioSource, fastApiUrl]);
+
+  useEffect(() => {
+    const colombia = musicRegion === 'CO' || (musicRegion === 'auto' && (navigator.languages?.some(lang => /-CO\b/i.test(lang)) || /-CO\b/i.test(navigator.language)));
+    const hasRealHistory = favorites50List.some(track => !INITIAL_TRACKS.some(demo => demo.id === track.id && track.sourceType === 'curated'));
+    if (!colombia || hasRealHistory || !isOnline) { setRegionalTracks([]); setRegionalLoading(false); return; }
+    let cancelled = false;
+    setRegionalLoading(true);
+    searchFreeMusicOnline('reggaeton y musica tropical colombia', fastApiUrl).then(results => {
+      if (!cancelled) setRegionalTracks(results);
+    }).finally(() => { if (!cancelled) setRegionalLoading(false); });
+    return () => { cancelled = true; };
+  }, [fastApiUrl, favorites50List, musicRegion, isOnline]);
+
+  useEffect(() => {
+    const seed = favorites50List.find(track => !INITIAL_TRACKS.some(demo => demo.id === track.id && track.sourceType === 'curated'));
+    if (!seed || !isOnline) { setPersonalTracks([]); return; }
+    let cancelled = false;
+    searchFreeMusicOnline(recommendationQuery(seed), fastApiUrl).then(results => {
+      if (!cancelled) setPersonalTracks(results);
+    });
+    return () => { cancelled = true; };
+  }, [fastApiUrl, favorites50List, isOnline]);
+
   // ==========================================
   // ALGORITMO SPOTIFY (+50% ESCUCHADO)
   // ==========================================
   const registerTrack50PercentListened = (track: Track) => {
     if (!track || !track.id) return;
     setFavorites50List((prev) => {
-      const exists = prev.some((t) => t.id === track.id || (t.title === track.title && t.artist === track.artist));
-      if (exists) return prev;
-      const updated = [{ ...track, liked: true }, ...prev];
+      const updated = [{ ...track, liked: true }, ...prev.filter(t => t.id !== track.id && (t.title !== track.title || t.artist !== track.artist))];
       try {
         localStorage.setItem('thomas_music_favorites_50', JSON.stringify(updated));
       } catch {}
@@ -672,10 +828,11 @@ export default function App() {
 
     setUserTasteProfile((prev) => {
       const artCount = (prev.favoriteArtists[track.artist] || 0) + 1;
-      const genCount = (prev.favoriteGenres[track.genre] || 0) + 1;
+      const genre = trackGenre(track);
+      const genCount = (prev.favoriteGenres[genre] || 0) + 1;
       const updated = {
         favoriteArtists: { ...prev.favoriteArtists, [track.artist]: artCount },
-        favoriteGenres: { ...prev.favoriteGenres, [track.genre]: genCount }
+        favoriteGenres: genre ? { ...prev.favoriteGenres, [genre]: genCount } : prev.favoriteGenres
       };
       try {
         localStorage.setItem('thomas_music_taste_profile', JSON.stringify(updated));
@@ -755,12 +912,14 @@ export default function App() {
   };
 
   const handlePlayPlaylist = (playlist: Playlist, startIndex = 0) => {
-    if (!playlist.tracks || playlist.tracks.length === 0) {
+    const queue = createPlaybackQueue(playlist.name, playlist.tracks || [], startIndex);
+    if (!queue) {
       showToast('Esta playlist está vacía');
       return;
     }
-    setTracks(playlist.tracks);
-    selectTrack(startIndex);
+    updatePlaybackQueue(queue);
+    setTracks(queue.tracks);
+    playSong(queue.tracks[queue.index], true, true);
     showToast(`Reproduciendo playlist: ${playlist.name}`);
   };
 
@@ -844,16 +1003,13 @@ export default function App() {
   // CARGAR CANCIONES OFFLINE DESDE INDEXEDDB AL INICIAR
   // ==========================================
   useEffect(() => {
+    let active = true;
     getAllOfflineTracks().then((saved) => {
-      if (saved.length > 0) {
-        setTracks((prev) => {
-          const map = new Map(prev.map((t) => [t.id, t]));
-          saved.forEach((s) => map.set(s.id, s));
-          return Array.from(map.values());
-        });
-        showToast(`${saved.length} canción(es) offline listas en tu Bóveda`);
-      }
-    }).catch(console.warn);
+      if (active) { updateOfflineTracks(saved); setVaultReady(true); }
+    }).catch((error) => {
+      console.warn('No se pudo abrir la bóveda:', error);
+      if (active) { setVaultReady(true); showToast('No se pudo abrir la bóveda offline en este dispositivo.'); }
+    });
 
     // Cargar tendencias gratuitas de Audius en segundo plano
     fetchTrendingFreeTracks().then((trending) => {
@@ -861,6 +1017,7 @@ export default function App() {
         setTracks((prev) => [...prev, ...trending]);
       }
     }).catch(console.warn);
+    return () => { active = false; };
   }, []);
 
   // ==========================================
@@ -1132,10 +1289,10 @@ export default function App() {
   // MEDIA SESSION & AUDÍFONOS / INTERCOMUNICADOR
   // ==========================================
   useEffect(() => {
-    if (currentTrack) {
+    if (currentTrack && (musicSelection > 0 || activeAudioSource === 'radio')) {
       updateMediaSessionMetadata(currentTrack);
     }
-  }, [currentTrack]);
+  }, [currentTrack, musicSelection, activeAudioSource]);
 
   useEffect(() => {
     registerMediaSessionHandlers({
@@ -1158,6 +1315,7 @@ export default function App() {
         }
       },
       onPause: () => {
+        nextRequestRef.current++;
         if (activeAudioSource === 'radio') {
           if (radioAudioRef.current) {
             radioAudioRef.current.pause();
@@ -1189,7 +1347,7 @@ export default function App() {
         }
       }
     });
-  }, [currentTrackIndex, tracks, duration, playbackSpeed, activeAudioSource]);
+  }, [currentTrackIndex, tracks, duration, playbackSpeed, activeAudioSource, autoRadioEnabled, relatedTracks, personalTracks, onlineSearchResults, favorites50List, userTasteProfile, radioStations, currentRadioStation]);
 
   const toggleWakeLock = async () => {
     if (isWakeLockActive) {
@@ -1338,6 +1496,8 @@ export default function App() {
   // CONTROL DE REPRODUCCIÓN & LOOP A-B
   // ==========================================
   const togglePlay = () => {
+    nextRequestRef.current++;
+    if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
     if (activeAudioSource === 'radio') {
       if (!radioAudioRef.current) return;
       if (isPlaying) {
@@ -1359,6 +1519,7 @@ export default function App() {
       return;
     }
 
+    if (!hasSelectedMusicRef.current) { showToast('Elige una canción para comenzar'); return; }
     initWebAudio();
     if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
       audioCtxRef.current.resume();
@@ -1373,22 +1534,61 @@ export default function App() {
     if (isPlaying) {
       audioRef.current.pause();
       setIsPlaying(false);
+      setIsBuffering(false);
     } else {
+      setIsBuffering(true);
+      if (!audioRef.current.getAttribute('src')) {
+        audioRef.current.src = currentMusicTrack.audioUrl;
+      }
       audioRef.current.play().then(() => {
         setIsPlaying(true);
       }).catch((err) => {
         console.warn('Reintentando play:', err);
         audioRef.current?.load();
-        audioRef.current?.play().then(() => setIsPlaying(true)).catch(console.warn);
+        audioRef.current?.play().then(() => setIsPlaying(true)).catch((retryError) => {
+          setIsBuffering(false);
+          console.warn(retryError);
+        });
       });
     }
   };
 
-  const playSong = (track: Track) => {
+  const playSong = (track: Track, rememberPrevious = true, preserveQueue = false) => {
     if (!track) return;
+    nextRequestRef.current++;
+    const playbackRequest = nextRequestRef.current;
+    if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+    if (!vaultReady) {
+      showToast('Espera un momento mientras se abre la bóveda offline.');
+      return;
+    }
+    const offlineCopy = offlineTracksRef.current.find(item => item.id === track.id);
+    if (!navigator.onLine && !offlineCopy) {
+      audioRef.current?.pause();
+      setIsPlaying(false);
+      setIsBuffering(false);
+      showToast('Esta canción no está descargada en este dispositivo.');
+      return;
+    }
+    const sourceTrack = offlineCopy || track;
+    const resolvedUrl = playbackUrl(sourceTrack, fastApiUrl, window.location.href);
+    if (!resolvedUrl) {
+      setIsPlaying(false);
+      setIsBuffering(false);
+      showToast('Esta canción no tiene un enlace de audio disponible. Búscala de nuevo.');
+      return;
+    }
+    if (!preserveQueue) updatePlaybackQueue(null);
+    if (rememberPrevious && activeAudioSource === 'music' && hasSelectedMusicRef.current && currentMusicTrack.id !== track.id) {
+      recentTracksRef.current = [...recentTracksRef.current, currentMusicTrack].slice(-30);
+    }
+    hasSelectedMusicRef.current = true;
+    setMusicSelection(value => value + 1);
+    listeningRef.current = { trackId: track.id, lastTime: 0, lastWall: 0, listened: 0, counted: false };
     setUseSynthFallback(false);
     setActiveAudioSource('music');
     setIsPlaying(true);
+    setIsBuffering(true);
     setCurrentTime(0);
     setLoopA(null);
     setLoopB(null);
@@ -1408,35 +1608,37 @@ export default function App() {
       return [track, ...prev];
     });
 
-    setScrobbleHistory((prev) => [
-      {
-        title: track.title,
-        artist: track.artist,
-        time: 'Ahora mismo',
-        match: calculateAffinityScore(track)
-      },
-      ...prev.slice(0, 7)
-    ]);
-
     if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
       audioCtxRef.current.resume();
     }
 
     if (audioRef.current) {
-      audioRef.current.src = track.audioUrl;
+      audioRef.current.src = resolvedUrl;
       audioRef.current.load();
-      audioRef.current.play().catch((err) => {
-        console.warn('Playback retry on playSong:', err);
-        setTimeout(() => {
-          if (audioRef.current) {
-            audioRef.current.load();
-            audioRef.current.play().catch(console.warn);
-          }
-        }, 150);
+      playbackTimeoutRef.current = setTimeout(() => {
+        if (nextRequestRef.current !== playbackRequest || !audioRef.current || audioRef.current.readyState >= 3) return;
+        audioRef.current.pause();
+        setIsPlaying(false);
+        setIsBuffering(false);
+        showToast(track.audioUrl?.startsWith('blob:')
+          ? 'El archivo local ya no está disponible. Vuelve a cargarlo o búscalo en la bóveda offline.'
+          : 'La canción tardó demasiado en cargar. Revisa el servidor o prueba otra pista.');
+      }, 25000);
+      audioRef.current.play().then(() => {
+        if (nextRequestRef.current !== playbackRequest) return;
+        if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+        showToast(`Reproduciendo: ${track.title}`);
+      }).catch((err) => {
+        if (nextRequestRef.current !== playbackRequest || err?.name === 'AbortError') return;
+        if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+        console.warn('No se pudo reproducir la pista:', err);
+        setIsPlaying(false);
+        setIsBuffering(false);
+        showToast(track.audioUrl?.startsWith('blob:')
+          ? 'El archivo local ya no está disponible. Vuelve a cargarlo o búscalo en la bóveda offline.'
+          : 'No se pudo reproducir. Revisa la conexión con el servidor o prueba otra canción.');
       });
     }
-
-    showToast(`Reproduciendo: ${track.title}`);
   };
 
   const selectTrack = (index: number) => {
@@ -1457,11 +1659,26 @@ export default function App() {
     }
 
     // Algoritmo Inteligente Spotify: Al superar el 50% de la canción se guarda en favoritas y perfil de gustos
-    if (activeAudioSource === 'music' && duration > 15 && now / duration >= 0.5) {
-      if (!listened50TrackIdsRef.current.has(currentMusicTrack.id)) {
-        listened50TrackIdsRef.current.add(currentMusicTrack.id);
-        registerTrack50PercentListened(currentMusicTrack);
-      }
+    const audio = audioRef.current;
+    const actualDuration = audio.duration;
+    const progress = listeningRef.current;
+    const wall = performance.now();
+    if (progress.trackId !== currentMusicTrack.id) {
+      listeningRef.current = { trackId: currentMusicTrack.id, lastTime: now, lastWall: wall, listened: 0, counted: false };
+      return;
+    }
+    if (isPlaying && !audio.paused && progress.lastWall) {
+      const elapsed = Math.max(0, (wall - progress.lastWall) / 1000) * audio.playbackRate;
+      const delta = now - progress.lastTime;
+      // Seeking does not count as listening; normal timeupdate jitter is tolerated.
+      if (delta > 0 && delta <= elapsed + 1) progress.listened += Math.min(delta, elapsed + 0.25);
+    }
+    progress.lastTime = now;
+    progress.lastWall = wall;
+    const isPreview = currentMusicTrack.duration > 60 && actualDuration < currentMusicTrack.duration * 0.5;
+    if (!progress.counted && !isPreview && activeAudioSource === 'music' && Number.isFinite(actualDuration) && actualDuration > 15 && progress.listened >= actualDuration * 0.5) {
+      progress.counted = true;
+      registerTrack50PercentListened(currentMusicTrack);
     }
   };
 
@@ -1478,7 +1695,8 @@ export default function App() {
     return Math.max(45, Math.min(99, Math.round(rawScore || 80)));
   };
 
-  const handleNextTrack = () => {
+  const handleNextTrack = async () => {
+    const requestId = ++nextRequestRef.current;
     if (activeAudioSource === 'radio') {
       const currentIdx = radioStations.findIndex((s) => s.id === currentRadioStation.id);
       const nextIdx = (currentIdx + 1) % radioStations.length;
@@ -1486,35 +1704,48 @@ export default function App() {
       return;
     }
 
-    if (autoRadioEnabled && tracks.length > 1) {
-      const candidates = tracks
-        .map((t, idx) => {
-          let score = calculateAffinityScore(t);
-          // Bono significativo por artista escuchado > 50%
-          if (userTasteProfile.favoriteArtists[t.artist]) {
-            score += Math.min(35, userTasteProfile.favoriteArtists[t.artist] * 12);
-          }
-          // Bono por género escuchado > 50%
-          if (userTasteProfile.favoriteGenres[t.genre]) {
-            score += Math.min(20, userTasteProfile.favoriteGenres[t.genre] * 6);
-          }
-          return { idx, score };
-        })
-        .filter((item) => item.idx !== currentTrackIndex)
-        .sort((a, b) => b.score - a.score);
-
-      const bestMatch = candidates[0];
-      if (bestMatch) {
-        showToast(`✨ Reproducción automática: ${tracks[bestMatch.idx].title} (${tracks[bestMatch.idx].artist})`);
-        selectTrack(bestMatch.idx);
+    const queue = playbackQueueRef.current;
+    if (queue) {
+      const next = stepPlaybackQueue(queue, 1);
+      if (next) {
+        updatePlaybackQueue(next);
+        playSong(next.tracks[next.index], true, true);
         return;
       }
+      updatePlaybackQueue(null);
+      if (!autoRadioEnabled) {
+        audioRef.current?.pause();
+        setIsPlaying(false);
+        setIsBuffering(false);
+        showToast(`Terminó la playlist: ${queue.name}`);
+        return;
+      }
+    }
+
+    if (autoRadioEnabled) {
+      let candidates = rankRelated([...relatedTracks, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List], currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id));
+      const request = relatedRequestRef.current;
+      if (!candidates.length && request?.trackId === currentMusicTrack.id) {
+        showToast('Buscando canciones relacionadas…');
+        const results = await request.promise;
+        if (requestId !== nextRequestRef.current) return;
+        candidates = rankRelated([...results, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List], currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id));
+      }
+      if (candidates[0]) {
+        playSong(candidates[0]);
+        return;
+      }
+      audioRef.current?.pause();
+      setIsPlaying(false);
+      showToast('No encontramos otra canción relacionada. Busca más música o desactiva Auto-DJ para seguir la lista.');
+      return;
     }
     const nextIdx = (currentTrackIndex + 1) % tracks.length;
     selectTrack(nextIdx);
   };
 
   const handlePrevTrack = () => {
+    nextRequestRef.current++;
     if (activeAudioSource === 'radio') {
       const currentIdx = radioStations.findIndex((s) => s.id === currentRadioStation.id);
       const prevIdx = (currentIdx - 1 + radioStations.length) % radioStations.length;
@@ -1522,6 +1753,16 @@ export default function App() {
       return;
     }
 
+    const queue = playbackQueueRef.current;
+    if (queue) {
+      const previous = stepPlaybackQueue(queue, -1) || queue;
+      updatePlaybackQueue(previous);
+      playSong(previous.tracks[previous.index], false, true);
+      return;
+    }
+
+    const previous = recentTracksRef.current.pop();
+    if (previous) { playSong(previous, false); return; }
     const prevIdx = (currentTrackIndex - 1 + tracks.length) % tracks.length;
     selectTrack(prevIdx);
   };
@@ -1529,35 +1770,33 @@ export default function App() {
   // ==========================================
   // BÓVEDA OFFLINE PERSISTENTE (INDEXEDDB)
   // ==========================================
-  const toggleOfflineVault = async (trackId: string, e?: React.MouseEvent) => {
+  const toggleOfflineVault = async (trackId: string, e?: React.MouseEvent, trackHint?: Track) => {
     if (e) e.stopPropagation();
-    const target = tracks.find((t) => t.id === trackId);
+    if (!vaultReady) { showToast('Espera mientras se abre la bóveda offline.'); return; }
+    if (vaultBusyRef.current) { showToast('Espera a que termine la descarga actual.'); return; }
+    const target = trackHint || tracks.find(t => t.id === trackId) || offlineTracksRef.current.find(t => t.id === trackId) || onlineSearchResults.find(t => t.id === trackId) || favorites50List.find(t => t.id === trackId);
     if (!target) return;
-
-    if (target.cachedOffline) {
-      await removeTrackOffline(trackId);
-      setTracks((prev) =>
-        prev.map((t) => (t.id === trackId ? { ...t, cachedOffline: false } : t))
-      );
-      showToast(`Eliminado de la Bóveda Offline: ${target.title}`);
-    } else {
-      setDownloadingId(trackId);
-      try {
-        const saved = await saveTrackOffline(target);
-        setTracks((prev) =>
-          prev.map((t) => (t.id === trackId ? saved : t))
-        );
-        showToast(`Guardada permanentemente en Bóveda Offline sin DRM: ${target.title}`);
-      } catch (err) {
-        // Fallback optimista si CORS bloquea el blob
-        setTracks((prev) =>
-          prev.map((t) => (t.id === trackId ? { ...t, cachedOffline: true } : t))
-        );
-        showToast(`Guardado en caché de sesión: ${target.title}`);
-      } finally {
-        setDownloadingId(null);
+    vaultBusyRef.current = true;
+    try {
+      if (offlineTracksRef.current.some(t => t.id === trackId)) {
+        const removedUrl = offlineTracksRef.current.find(t => t.id === trackId)?.audioUrl;
+        await removeTrackOffline(trackId);
+        updateOfflineTracks(offlineTracksRef.current.filter(t => t.id !== trackId));
+        setTracks(previous => previous.filter(t => t.id !== trackId || t.audioUrl !== removedUrl));
+        if (homeOrderRef.current.tracks.get(trackId)?.audioUrl === removedUrl) {
+          homeOrderRef.current.tracks.delete(trackId);
+          homeOrderRef.current.ids = homeOrderRef.current.ids.filter(id => id !== trackId);
+        }
+        showToast(`Eliminado de la Bóveda Offline: ${target.title}`);
+      } else {
+        setDownloadingId(trackId);
+        const saved = await saveTrackOffline({ ...target, audioUrl: playbackUrl(target, fastApiUrl, window.location.href) });
+        updateOfflineTracks([...offlineTracksRef.current.filter(t => t.id !== trackId), saved]);
+        showToast(`Descargada en este dispositivo: ${target.title}`);
       }
-    }
+    } catch (err: any) {
+      showToast(err?.message || 'No se pudo modificar la descarga.');
+    } finally { setDownloadingId(null); vaultBusyRef.current = false; }
   };
 
   const toggleLike = (trackId: string, e?: React.MouseEvent) => {
@@ -1596,7 +1835,7 @@ export default function App() {
         coverUrl: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=600&auto=format&fit=crop&q=80',
         audioUrl: objectUrl,
         sourceType: 'local-file',
-        cachedOffline: true,
+        cachedOffline: false,
         liked: true,
         lyrics: [
           { time: 0, text: `♪ Archivo local: ${file.name} ♪` },
@@ -1608,7 +1847,7 @@ export default function App() {
 
     setTracks((prev) => [...newLocalTracks, ...prev]);
     setUseSynthFallback(false);
-    selectTrack(0);
+    playSong(newLocalTracks[0]);
     showToast(`${newLocalTracks.length} archivo(s) local(es) cargado(s)`);
   };
 
@@ -1749,9 +1988,30 @@ export default function App() {
   };
 
   const filteredTracks = useMemo(() => {
-    return tracks
+    const colombia = musicRegion === 'CO' || (musicRegion === 'auto' && (navigator.languages?.some(lang => /-CO\b/i.test(lang)) || /-CO\b/i.test(navigator.language)));
+    const hasRealHistory = favorites50List.some(track => !INITIAL_TRACKS.some(demo => demo.id === track.id && track.sourceType === 'curated'));
+    const waitingForRegional = colombia && !hasRealHistory && regionalLoading;
+    const source = activeTab === 'vault' ? offlineTracks : activeTab === 'home'
+      ? (waitingForRegional ? [] : [...regionalTracks, ...offlineTracks, ...tracks, ...personalTracks, ...relatedTracks].filter(track => !INITIAL_TRACKS.some(demo => demo.id === track.id && track.sourceType === 'curated')))
+      : tracks;
+    const seen = new Set<string>();
+    let unique = source.filter(t => !seen.has(t.id) && !!seen.add(t.id));
+    if (activeTab === 'home') {
+      const scope = `${currentUser?.id || 'guest'}:${musicRegion}`;
+      if (homeOrderRef.current.scope !== scope) homeOrderRef.current = { scope, ids: [], tracks: new Map() };
+      const known = new Set(homeOrderRef.current.ids);
+      for (const track of unique) {
+        if (!known.has(track.id) && homeOrderRef.current.ids.length < 200) {
+          homeOrderRef.current.ids.push(track.id);
+          known.add(track.id);
+        }
+        if (known.has(track.id)) homeOrderRef.current.tracks.set(track.id, track);
+      }
+      unique = homeOrderRef.current.ids.map(id => homeOrderRef.current.tracks.get(id)).filter((track): track is Track => !!track);
+    }
+    const rank = new Map(homeOrderRef.current.ids.map((id, index) => [id, index]));
+    return unique
       .filter((t) => {
-        if (activeTab === 'vault' && !t.cachedOffline) return false;
         if (!searchQuery.trim()) return true;
         const q = searchQuery.toLowerCase();
         return (
@@ -1764,8 +2024,8 @@ export default function App() {
         ...t,
         affinity: calculateAffinityScore(t)
       }))
-      .sort((a, b) => (activeTab === 'ai-radio' ? b.affinity - a.affinity : 0));
-  }, [tracks, activeTab, searchQuery, algoEnergyTarget, algoAcousticTarget, algoBpmTarget]);
+      .sort((a, b) => activeTab === 'home' ? (rank.get(a.id) ?? 9999) - (rank.get(b.id) ?? 9999) : (activeTab === 'ai-radio' ? b.affinity - a.affinity : 0));
+  }, [tracks, offlineTracks, relatedTracks, personalTracks, regionalTracks, regionalLoading, favorites50List, currentUser?.id, musicRegion, activeTab, searchQuery, algoEnergyTarget, algoAcousticTarget, algoBpmTarget]);
 
   // Paginación limpia de 10 canciones para Inicio & Tendencias
   const homeTotalPages = Math.ceil(filteredTracks.length / HOME_PAGE_SIZE) || 1;
@@ -1826,13 +2086,34 @@ export default function App() {
     }
   }[themeAccent];
 
+  const nextInPlaylist = playbackQueue ? stepPlaybackQueue(playbackQueue, 1)?.tracks[playbackQueue.index + 1] : undefined;
+  const nextSuggestion = activeAudioSource === 'music' && hasSelectedMusicRef.current
+    ? nextInPlaylist || (autoRadioEnabled ? rankRelated([...relatedTracks, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List], currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id))[0] : undefined)
+    : undefined;
+
+  useEffect(() => {
+    if (!isPlaying || !nextSuggestion?.audioUrl) return;
+    try {
+      const audioUrl = new URL(playbackUrl(nextSuggestion, fastApiUrl, window.location.href), window.location.href);
+      const backend = new URL(fastApiUrl, window.location.href);
+      const expectedPath = `${backend.pathname.replace(/\/$/, '')}/stream_yt`;
+      const videoId = audioUrl.searchParams.get('v');
+      if (audioUrl.origin !== backend.origin || audioUrl.pathname !== expectedPath || !videoId || !/^[\w-]{11}$/.test(videoId)) return;
+      const controller = new AbortController();
+      fetch(`${fastApiUrl}/prepare_stream?v=${encodeURIComponent(videoId)}`, { signal: controller.signal }).catch(() => {});
+      return () => controller.abort();
+    } catch { return; }
+  }, [nextSuggestion?.audioUrl, fastApiUrl, isPlaying]);
+
   return (
     <div className="min-h-screen bg-[#0b0d10] text-zinc-100 flex flex-col font-sans select-none overflow-x-hidden">
       {/* REPRODUCTOR DEDICADO DE PISTAS DE MÚSICA (SOPORTE COMPLETO DSP, ECUALIZADOR Y 8D) */}
       <audio
         ref={audioRef}
-        src={activeAudioSource === 'music' ? currentMusicTrack.audioUrl : undefined}
         crossOrigin="anonymous"
+        onWaiting={() => setIsBuffering(true)}
+        onPlaying={() => { if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current); setIsBuffering(false); }}
+        onPause={() => setIsBuffering(false)}
         onTimeUpdate={handleTimeUpdate}
         onLoadedMetadata={(e) => {
           if (activeAudioSource === 'music') {
@@ -1841,7 +2122,12 @@ export default function App() {
         }}
         onError={(e) => {
           const err = (e.target as HTMLAudioElement).error;
+          setIsBuffering(false);
           console.warn('Music stream event:', err?.code, err?.message);
+          if (activeAudioSource === 'music' && isPlaying && err?.code !== MediaError.MEDIA_ERR_ABORTED) {
+            setIsPlaying(false);
+            showToast('No se pudo reproducir esta pista. Prueba otra fuente o revisa la conexión.');
+          }
         }}
         onEnded={() => {
           if (activeAudioSource === 'music') {
@@ -1853,7 +2139,6 @@ export default function App() {
       {/* REPRODUCTOR DEDICADO DE RADIO EN VIVO (SIN RESTRICCIONES CORS, CONEXIÓN RESILIENTE 24/7) */}
       <audio
         ref={radioAudioRef}
-        src={activeAudioSource === 'radio' ? currentRadioStation.audioUrl : undefined}
         onLoadedMetadata={() => setDuration(0)}
         onError={(e) => {
           const err = (e.target as HTMLAudioElement).error;
@@ -1917,6 +2202,59 @@ export default function App() {
       )}
 
       {/* BARRA SUPERIOR (HEADER) */}
+      {currentUser && syncStatus !== 'synced' && (
+        <div role="status" className="sync-banner">
+          <span className="sync-banner__dot" />
+          <span>{syncStatus === 'conflict' ? 'Hay cambios diferentes en otro dispositivo. Elige qué versión conservar.' :
+            syncStatus === 'syncing' ? 'Sincronizando tu biblioteca…' :
+            syncStatus === 'auth' ? 'Tus cambios están guardados aquí. Inicia sesión de nuevo para sincronizar.' :
+            syncStatus === 'pending' ? 'Cambios guardados aquí · esperando conexión' : 'Biblioteca guardada en este dispositivo'}</span>
+          {syncStatus === 'conflict' && <div className="sync-banner__actions">
+            <button disabled={syncBusy} onClick={() => { setConflictOpen(true); void loadConflictPreview(); }}>Comparar versiones</button>
+          </div>}
+        </div>
+      )}
+      {conflictOpen && <div className="conflict-overlay" onClick={() => { if (!syncBusy) setConflictOpen(false); }}>
+        <section className="conflict-dialog" role="dialog" aria-modal="true" aria-labelledby="conflict-title" onClick={event => event.stopPropagation()} onKeyDown={event => {
+          if (event.key === 'Escape' && !syncBusy) setConflictOpen(false);
+        }}>
+          <div className="conflict-dialog__heading">
+            <div>
+              <p className="conflict-dialog__eyebrow">TU BIBLIOTECA · SINCRONIZACIÓN</p>
+              <h2 id="conflict-title">Compara antes de decidir</h2>
+            </div>
+            <button autoFocus aria-label="Cerrar comparación" disabled={syncBusy} onClick={() => setConflictOpen(false)} className="conflict-dialog__close"><X className="w-5 h-5" /></button>
+          </div>
+          <p className="conflict-dialog__intro">Hay cambios en ambos lugares. Ninguna versión se modificará hasta que elijas una opción.</p>
+          {syncBusy && !conflictPreview && <p role="status" className="conflict-dialog__notice">Consultando la biblioteca del servidor…</p>}
+          {conflictError && <div role="alert" className="conflict-dialog__error">{conflictError} <button disabled={syncBusy} onClick={() => void loadConflictPreview()}>Actualizar comparación</button></div>}
+          {conflictPreview && <>
+            <div className="conflict-versions">
+              {([{ label: 'Este dispositivo', key: 'dispositivo', data: conflictPreview.local }, { label: 'Servidor', key: 'servidor', data: conflictPreview.remote }] as const).map(version => (
+                <div className="conflict-version" key={version.key}>
+                  <div className="conflict-version__top"><h3>{version.label}</h3><span>{version.data.playlists.length} playlists · {version.data.favorites50List.length} escuchadas</span></div>
+                  <ul>
+                    {version.data.playlists.map(playlist => <li key={playlist.id}><details><summary><span>{playlist.name}</span><span>{playlist.tracks.length} canciones</span></summary>
+                      {playlist.tracks.length > 0 ? <ol>{playlist.tracks.map((track, index) => <li key={`${track.id}-${index}`}>{track.title} <span>· {track.artist}</span></li>)}</ol> : <p className="conflict-version__empty">Esta playlist está vacía.</p>}
+                    </details></li>)}
+                    {version.data.playlists.length === 0 && <li>Sin playlists</li>}
+                  </ul>
+                  <button onClick={() => downloadConflictCopy(version.data, version.key)} disabled={syncBusy}>Descargar copia JSON</button>
+                </div>
+              ))}
+            </div>
+            <div className="conflict-dialog__explanation">
+              <strong>Combinar conserva ambas versiones.</strong> Si una misma playlist cambió en ambos lugares, se guardan dos copias. Las canciones eliminadas pueden reaparecer; los archivos de audio locales no se transfieren entre dispositivos.
+            </div>
+            <div className="conflict-dialog__actions">
+              <button className="conflict-dialog__primary" disabled={syncBusy} onClick={() => void handleResolveSync('merge')}>Combinar bibliotecas</button>
+              <button disabled={syncBusy} onClick={() => void handleResolveSync('local')}>Usar este dispositivo</button>
+              <button disabled={syncBusy} onClick={() => void handleResolveSync('server')}>Usar servidor</button>
+            </div>
+            <p className="conflict-dialog__footnote">Antes de aplicar cambios se guarda una copia de ambas versiones en este navegador. Los botones de descarga guardan metadatos y listas, no los archivos de audio.</p>
+          </>}
+        </section>
+      </div>}
       <header className="h-16 border-b border-zinc-800/80 bg-[#0b0d10]/95 backdrop-blur-xl px-4 lg:px-6 flex items-center justify-between sticky top-0 z-30">
         <div className="flex items-center gap-3">
           <div className={`relative w-11 h-11 rounded-2xl ${accentClasses.bg} p-1 flex items-center justify-center shadow-lg ${accentClasses.glow} shrink-0`}>
@@ -1938,68 +2276,6 @@ export default function App() {
               Tu música favorita sin anuncios • Calidad de estudio
             </p>
           </div>
-        </div>
-
-        {/* BUSCADOR CENTRAL CON AUTOCOMPLETADO EN TIEMPO REAL */}
-        <div className="flex-1 max-w-md mx-4 relative">
-          <div className="relative">
-            <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => handleSearchInputChange(e.target.value)}
-              onFocus={() => {
-                if (searchSuggestions.length > 0) setIsSuggestionsOpen(true);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  setIsSuggestionsOpen(false);
-                  executeOnlineSearch(searchQuery);
-                }
-              }}
-              placeholder="Buscar canción, artista (ej: Karol G, Feid, Lo-Fi)..."
-              className="w-full bg-zinc-900/90 border border-zinc-800 focus:border-emerald-500/60 rounded-full pl-10 pr-9 py-1.5 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none transition shadow-inner"
-            />
-            {searchQuery && (
-              <button
-                type="button"
-                onClick={() => {
-                  setSearchQuery('');
-                  setSearchSuggestions([]);
-                  setIsSuggestionsOpen(false);
-                }}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            )}
-          </div>
-
-          {/* DESPLEGABLE DE SUGERENCIAS EN TIEMPO REAL */}
-          {isSuggestionsOpen && searchSuggestions.length > 0 && (
-            <div className="absolute top-full left-0 right-0 mt-1.5 bg-[#11131C] border border-zinc-700/80 rounded-2xl shadow-2xl overflow-hidden z-50 py-1.5 backdrop-blur-xl">
-              <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-400 flex items-center justify-between border-b border-zinc-800/80">
-                <span className={`flex items-center gap-1.5 ${accentClasses.text}`}>
-                  <Sparkles className="w-3 h-3" />
-                  Sugerencias Rápidas
-                </span>
-                <span className="text-[9px] text-zinc-500">Toca para buscar</span>
-              </div>
-              <div className="max-h-56 overflow-y-auto">
-                {searchSuggestions.map((sug, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => handleSelectSuggestion(sug)}
-                    className="w-full text-left px-3.5 py-2 text-xs text-zinc-200 hover:bg-zinc-800/80 hover:text-emerald-300 flex items-center gap-2.5 transition"
-                  >
-                    <Search className="w-3.5 h-3.5 text-zinc-500 shrink-0" />
-                    <span className="truncate">{sug}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
 
         {/* ACCIONES RÁPIDAS SUPERIORES */}
@@ -2197,7 +2473,7 @@ export default function App() {
               { id: 'favorites', label: 'Favoritas & +50%', icon: Heart, badge: favorites50List.length },
               { id: 'radio', label: 'Radio en Vivo (FM/AM)', icon: Radio, badge: '🔴 LIVE' },
               { id: 'dsp-studio', label: 'Ecualizador DSP & Boost', icon: Sliders, badge: `${Math.round(volume * 100)}%` },
-              { id: 'vault', label: 'Bóveda Offline', icon: ShieldCheck, badge: tracks.filter((t) => t.cachedOffline).length }
+              { id: 'vault', label: 'Bóveda Offline', icon: ShieldCheck, badge: offlineTracks.length }
             ].map((item) => {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
@@ -2287,90 +2563,53 @@ export default function App() {
                   <Compass className={`w-4 h-4 ${accentClasses.text}`} />
                   <div>
                     <h2 className="text-xs font-bold uppercase tracking-wider text-zinc-300">
-                      Algoritmo Thomas IA
+                      Tu Auto-DJ
                     </h2>
-                    <span className="text-[10px] text-zinc-500 block">Auto-DJ inteligente para tus canciones</span>
+                    <span className="text-[10px] text-zinc-500 block">Música que sigue tu ritmo</span>
                   </div>
                 </div>
                 <button
                   onClick={() => setAutoRadioEnabled(!autoRadioEnabled)}
+                  aria-pressed={autoRadioEnabled}
                   className={`text-[11px] px-2.5 py-0.5 rounded-full font-semibold border transition ${
                     autoRadioEnabled
                       ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300'
                       : 'bg-zinc-800 border-zinc-700 text-zinc-400'
                   }`}
                 >
-                  {autoRadioEnabled ? 'Auto-DJ IA ON' : 'Manual'}
+                  {autoRadioEnabled ? 'Activado' : 'Desactivado'}
                 </button>
               </div>
               <p className="text-xs text-zinc-400 leading-relaxed">
-                El motor inteligente que elige la siguiente canción automáticamente según el ritmo, BPM y tus artistas preferidos para que la música nunca se detenga:
+                {autoRadioEnabled
+                  ? 'Primero respeta el orden de tu playlist. Al terminar, busca música relacionada con tus gustos.'
+                  : 'Seguirás el orden de tu lista. Actívalo para buscar canciones relacionadas.'}
               </p>
 
-              <div className="space-y-3 pt-1">
-                <div>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-zinc-400">Energía deseada</span>
-                    <span className="font-mono font-bold text-zinc-200">{algoEnergyTarget}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={algoEnergyTarget}
-                    onChange={(e) => setAlgoEnergyTarget(Number(e.target.value))}
-                    className="w-full accent-emerald-500 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
-                  />
-                </div>
-
-                <div>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-zinc-400">Nivel Acústico</span>
-                    <span className="font-mono font-bold text-zinc-200">{algoAcousticTarget}%</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="100"
-                    value={algoAcousticTarget}
-                    onChange={(e) => setAlgoAcousticTarget(Number(e.target.value))}
-                    className="w-full accent-emerald-500 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
-                  />
-                </div>
-
-                <div>
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-zinc-400">Tempo (BPM)</span>
-                    <span className="font-mono font-bold text-zinc-200">{algoBpmTarget} BPM</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="60"
-                    max="180"
-                    value={algoBpmTarget}
-                    onChange={(e) => setAlgoBpmTarget(Number(e.target.value))}
-                    className="w-full accent-emerald-500 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
-                  />
-                </div>
-              </div>
+              {(autoRadioEnabled || playbackQueue) && activeAudioSource === 'music' && <div className="rounded-xl bg-zinc-900/70 px-3 py-2.5">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{nextInPlaylist ? 'Siguiente en tu playlist' : 'Siguiente sugerencia'}</span>
+                {nextSuggestion ? <>
+                  <p className="mt-1 text-xs font-semibold text-zinc-100 truncate">{nextSuggestion.title}</p>
+                  <p className="text-[11px] text-zinc-400 truncate">{nextSuggestion.artist}</p>
+                  <p className={`mt-1.5 text-[10px] ${accentClasses.text}`}>{nextInPlaylist ? `Playlist: ${playbackQueue?.name}` : relatedReason(currentMusicTrack, nextSuggestion)}</p>
+                </> : <p className="mt-1 text-xs leading-relaxed text-zinc-400">Elige una canción para encontrar música relacionada. Las sugerencias dependen del catálogo disponible.</p>}
+              </div>}
 
               {/* Historial Scrobble */}
               <div className="pt-2 border-t border-zinc-800/80">
                 <span className="text-[11px] font-semibold uppercase tracking-wider text-zinc-400 block mb-2">
-                  Últimos Scrobbles
+                  Escuchadas más del 50 %
                 </span>
                 <div className="space-y-1.5 max-h-24 overflow-y-auto pr-1">
-                  {scrobbleHistory.map((item, i) => (
-                    <div key={i} className="flex items-center justify-between text-xs bg-zinc-900/70 px-2.5 py-1.5 rounded-lg">
+                  {favorites50List.slice(0, 8).map((item) => (
+                    <div key={item.id} className="flex items-center justify-between text-xs bg-zinc-900/70 px-2.5 py-1.5 rounded-lg">
                       <div className="truncate pr-2">
                         <p className="font-medium text-zinc-200 truncate">{item.title}</p>
                         <p className="text-[10px] text-zinc-500">{item.artist}</p>
                       </div>
-                      <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 ${accentClasses.text}`}>
-                        {item.match}%
-                      </span>
                     </div>
                   ))}
+                  {favorites50List.length === 0 && <p className="text-xs leading-relaxed text-zinc-500">Aún no hay escuchas registradas. Escucha más de la mitad de una canción para empezar.</p>}
                 </div>
               </div>
             </div>
@@ -2382,8 +2621,14 @@ export default function App() {
         {/* COLUMNA CENTRAL (En celular se muestra PRIMERO con order-1 para ver las canciones de inmediato) */}
         <main className="order-1 lg:order-2 lg:col-span-6 space-y-4">
           {/* TARJETA HERO DINÁMICA (MÚSICA O RADIO EN VIVO) CON ANIMACIÓN FFT DE AUDIO */}
-          {activeTab !== 'radio' && (
-            <div className="relative rounded-2xl overflow-hidden border border-zinc-800/90 bg-gradient-to-br from-[#151928] via-[#10121A] to-[#0B0C12] p-5 shadow-xl">
+          {activeTab !== 'radio' && musicSelection === 0 && activeAudioSource === 'music' && (
+            <div className="hidden md:block rounded-2xl border border-zinc-800 bg-[#11131C] p-5">
+              <h2 className="text-lg font-bold text-white">Tu música empieza aquí</h2>
+              <p className="mt-1 text-sm text-zinc-400">Elige una canción de las sugerencias o usa el buscador para comenzar.</p>
+            </div>
+          )}
+          {activeTab !== 'radio' && (musicSelection > 0 || activeAudioSource === 'radio') && (
+            <div className="hidden md:block relative rounded-2xl overflow-hidden border border-zinc-800/90 bg-gradient-to-br from-[#151928] via-[#10121A] to-[#0B0C12] p-5 shadow-xl">
               <div className="flex flex-col sm:flex-row items-center gap-5 z-10 relative">
                 <div className="relative group shrink-0">
                   <img
@@ -2422,12 +2667,12 @@ export default function App() {
                     ) : (
                       <>
                         <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full bg-zinc-800/90 ${accentClasses.text}`}>
-                          {calculateAffinityScore(currentMusicTrack)}% Afinidad IA
+                          Ajuste sonoro {calculateAffinityScore(currentMusicTrack)}%
                         </span>
                         <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-zinc-800/80 text-zinc-300">
                           {Math.round(currentMusicTrack.bpm * playbackSpeed)} BPM • {currentMusicTrack.keySignature}
                         </span>
-                        {currentMusicTrack.cachedOffline && (
+                        {isDownloaded(currentMusicTrack.id) && (
                           <span className="text-[11px] px-2.5 py-0.5 rounded-full bg-emerald-950/90 border border-emerald-500/40 text-emerald-300 flex items-center gap-1">
                             <CheckCircle2 className="w-3 h-3" /> Offline Vault
                           </span>
@@ -2526,7 +2771,7 @@ export default function App() {
             /* PESTAÑA EMISORAS DE RADIO EN VIVO (SECCIÓN 100% EXCLUSIVA RADIO) */
             <div className="space-y-4">
               {/* TARJETA HERO TUNER DE LA EMISORA SINTONIZADA */}
-              <div className="relative rounded-2xl overflow-hidden border border-red-500/40 bg-gradient-to-br from-[#1e0f14] via-[#140d12] to-[#0b0c10] p-5 shadow-2xl">
+              <div className="hidden md:block relative rounded-2xl overflow-hidden border border-red-500/40 bg-gradient-to-br from-[#1e0f14] via-[#140d12] to-[#0b0c10] p-5 shadow-2xl">
                 <div className="flex flex-col sm:flex-row items-center gap-5 z-10 relative">
                   <div className="relative group shrink-0">
                     <img
@@ -3140,10 +3385,7 @@ export default function App() {
 
                           {/* Descargar a Bóveda Offline */}
                           <button
-                            onClick={() => {
-                              setTracks((prev) => [track, ...prev]);
-                              toggleOfflineVault(track.id);
-                            }}
+                            onClick={() => toggleOfflineVault(track.id, undefined, track)}
                             className="p-2 rounded-xl border border-zinc-800 hover:border-emerald-500 text-zinc-400 hover:text-emerald-400 transition"
                             title="Descargar para escuchar sin internet"
                           >
@@ -3281,7 +3523,7 @@ export default function App() {
                           <h2 className="text-2xl font-black text-white truncate">{currentPl.name}</h2>
                           <p className="text-xs text-zinc-400 mt-1">{currentPl.description}</p>
                           <p className="text-[11px] text-zinc-500 font-mono mt-1">
-                            {currentPl.tracks.length} canciones • Guardada en tu dispositivo
+                             {currentPl.tracks.length} canciones · {currentPl.tracks.filter(t => isDownloaded(t.id)).length} descargadas en este dispositivo
                           </p>
                           <div className="flex items-center justify-center sm:justify-start gap-2.5 pt-3">
                             <button
@@ -3320,6 +3562,14 @@ export default function App() {
                                 </div>
                               </div>
                               <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                                <button
+                                  onClick={() => toggleOfflineVault(track.id, undefined, track)}
+                                  disabled={downloadingId === track.id}
+                                  className="p-1.5 text-zinc-400 hover:text-emerald-400 disabled:opacity-50"
+                                  aria-label={isDownloaded(track.id) ? `Eliminar descarga de ${track.title}` : `Descargar ${track.title} para escuchar sin conexión`}
+                                >
+                                  {downloadingId === track.id ? <RefreshCw className="w-4 h-4 animate-spin" /> : isDownloaded(track.id) ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <Download className="w-4 h-4" />}
+                                </button>
                                 <span className="text-[11px] text-zinc-500 font-mono hidden sm:inline">
                                   {formatTime(track.duration)}
                                 </span>
@@ -3438,8 +3688,7 @@ export default function App() {
                 {favorites50List.length > 0 && (
                   <button
                     onClick={() => {
-                      setTracks(favorites50List);
-                      selectTrack(0);
+                      handlePlayPlaylist({ id: 'favorites-queue', name: 'Favoritas y escuchadas', createdAt: 0, tracks: favorites50List });
                       showToast('Reproduciendo tu Mix de Favoritas y +50%');
                     }}
                     className={`${accentClasses.bg} text-black font-extrabold text-xs px-4 py-2 rounded-xl flex items-center gap-2 shadow-lg transition`}
@@ -3455,7 +3704,7 @@ export default function App() {
                   {favorites50List.map((track, idx) => (
                     <div
                       key={track.id}
-                      onClick={() => playSong(track)}
+                      onClick={() => handlePlayPlaylist({ id: 'favorites-queue', name: 'Favoritas y escuchadas', createdAt: 0, tracks: favorites50List }, idx)}
                       className="group flex items-center justify-between p-2.5 rounded-xl border border-transparent hover:border-zinc-700 bg-zinc-900/50 hover:bg-zinc-800/60 cursor-pointer transition"
                     >
                       <div className="flex items-center gap-3.5 min-w-0 flex-1">
@@ -3492,10 +3741,7 @@ export default function App() {
 
                         {/* Guardar en Bóveda Offline */}
                         <button
-                          onClick={() => {
-                            setTracks((prev) => [track, ...prev]);
-                            toggleOfflineVault(track.id);
-                          }}
+                            onClick={() => toggleOfflineVault(track.id, undefined, track)}
                           className="p-1.5 text-zinc-400 hover:text-emerald-400"
                           title="Descargar offline"
                         >
@@ -3730,8 +3976,23 @@ export default function App() {
                   <p className="text-xs text-zinc-400">
                     {activeTab === 'vault'
                       ? 'Canciones descargadas en la memoria de tu dispositivo. Escucha sin consumir datos.'
-                      : 'Música en tendencia seleccionada para ti según tus gustos.'}
+                      : favorites50List.length > 0 || hasSelectedMusicRef.current
+                        ? 'Una mezcla basada en lo que escuchas y en tu canción actual.'
+                        : regionalTracks.length > 0
+                          ? 'Para empezar: una selección de sonidos de Colombia.'
+                          : 'Explora música para empezar; tus sugerencias mejoran al escuchar.'}
                   </p>
+                  {activeTab === 'home' && <label className="inline-flex items-center gap-2 mt-2 text-xs text-zinc-400">
+                    Región inicial
+                    <select aria-label="Región inicial de recomendaciones" value={musicRegion} onChange={event => {
+                      setMusicRegion(event.target.value);
+                      localStorage.setItem('thomas_music_region', event.target.value);
+                    }} className="rounded-md bg-zinc-900 border border-zinc-700 px-2 py-1 text-zinc-200">
+                      <option value="auto">Según el dispositivo</option>
+                      <option value="CO">Colombia</option>
+                      <option value="global">Global</option>
+                    </select>
+                  </label>}
                 </div>
                 <span className="text-xs text-zinc-400 font-mono">
                   {homeTotalPages > 1 ? `Página ${homeCurrentPage} de ${homeTotalPages}` : `${filteredTracks.length} canciones`}
@@ -3739,14 +4000,16 @@ export default function App() {
               </div>
 
               <div className="space-y-1.5">
+                {filteredTracks.length === 0 && <p role="status" className="px-2 py-4 text-sm text-zinc-400">
+                  {regionalLoading && activeTab === 'home' ? 'Buscando música para comenzar…' : 'No hay canciones disponibles aquí. Prueba una búsqueda o revisa la conexión.'}
+                </p>}
                 {paginatedHomeTracks.map((track) => {
-                  const realIndex = tracks.findIndex((t) => t.id === track.id);
-                  const isCurrent = realIndex === currentTrackIndex;
+                  const isCurrent = activeAudioSource === 'music' && currentMusicTrack.id === track.id;
 
                   return (
                     <div
                       key={track.id}
-                      onClick={() => selectTrack(realIndex)}
+                      onClick={() => playSong(track)}
                       className={`group flex items-center justify-between p-2.5 rounded-xl border transition cursor-pointer ${
                         isCurrent
                           ? `bg-zinc-800/90 ${accentClasses.border} shadow-md`
@@ -3797,25 +4060,22 @@ export default function App() {
                       {/* Botones de acción */}
                       <div className="flex items-center gap-2 ml-2">
                         <div className="hidden sm:flex flex-col items-end">
-                          <span className={`text-xs font-mono font-bold ${accentClasses.text}`}>
-                            {track.affinity}% Match
-                          </span>
                           <span className="text-[10px] text-zinc-500">{track.genre}</span>
                         </div>
 
                         {/* Guardar en Bóveda Offline */}
                         <button
-                          onClick={(e) => toggleOfflineVault(track.id, e)}
-                          title={track.cachedOffline ? 'Guardada en memoria offline' : 'Guardar en Bóveda Offline'}
+                          onClick={(e) => toggleOfflineVault(track.id, e, track)}
+                          title={isDownloaded(track.id) ? 'Guardada en memoria offline' : 'Guardar en Bóveda Offline'}
                           className={`p-2 rounded-xl border transition ${
-                            track.cachedOffline
+                            isDownloaded(track.id)
                               ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
                               : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-600'
                           }`}
                         >
                           {downloadingId === track.id ? (
                             <RefreshCw className="w-4 h-4 animate-spin text-emerald-400" />
-                          ) : track.cachedOffline ? (
+                          ) : isDownloaded(track.id) ? (
                             <CheckCircle2 className="w-4 h-4" />
                           ) : (
                             <Download className="w-4 h-4" />
@@ -3823,11 +4083,11 @@ export default function App() {
                         </button>
 
                         {/* Exportar MP3 sin DRM */}
-                        {track.cachedOffline && (
+                        {isDownloaded(track.id) && (
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              exportDrmFreeFile(track);
+                              exportDrmFreeFile(offlineTracks.find(item => item.id === track.id) || track);
                               showToast(`Exportando MP3: ${track.title}`);
                             }}
                             title="Exportar archivo MP3 directo sin DRM"
@@ -4136,48 +4396,53 @@ export default function App() {
       </div>
 
       {/* REPRODUCTOR MINI FLOTANTE EN CELULAR (SOBRE LA BARRA DE NAVEGACIÓN INFERIOR) */}
-      <div
-        onClick={() => setIsMobileNowPlayingOpen(true)}
-        className="md:hidden fixed bottom-16 left-2 right-2 z-40 bg-[#161a23]/95 backdrop-blur-xl border border-zinc-700/80 rounded-2xl p-2.5 shadow-2xl flex items-center justify-between cursor-pointer"
+      {(musicSelection > 0 || activeAudioSource === 'radio') && <div
+        className="mobile-deck md:hidden fixed bottom-16 left-2 right-2 z-40 bg-[#161a23]/95 backdrop-blur-xl border border-zinc-700/80 rounded-2xl p-2.5 shadow-2xl flex items-center justify-between cursor-pointer"
       >
-        <div className="flex items-center gap-3 min-w-0 flex-1">
+        <button onClick={() => setIsMobileNowPlayingOpen(true)} aria-label={`Abrir reproductor: ${currentTrack.title}, ${currentTrack.artist}`} className="flex items-center gap-3 min-w-0 flex-1 text-left">
           <img src={currentTrack.coverUrl} alt={currentTrack.title} className="w-11 h-11 rounded-xl object-cover shrink-0" />
           <div className="min-w-0 flex-1">
             <p className="text-xs font-bold text-white truncate">{currentTrack.title}</p>
-            <p className="text-[11px] text-zinc-400 truncate">{currentTrack.artist}</p>
+            <p className="text-[11px] text-zinc-400 truncate">{isBuffering && activeAudioSource === 'music' ? 'Preparando audio…' : playbackQueue ? `${playbackQueue.name} · ${playbackQueue.index + 1}/${playbackQueue.tracks.length}` : currentTrack.artist}</p>
           </div>
-        </div>
+        </button>
 
         <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
           <button
-            onClick={() => setIs8DAudio(!is8DAudio)}
-            className={`p-2 rounded-xl text-xs font-bold ${is8DAudio ? 'text-emerald-400' : 'text-zinc-400'}`}
+            onClick={handlePrevTrack}
+            aria-label="Canción o emisora anterior"
+            className="p-2 text-zinc-300 hover:text-white"
           >
-            8D
+            <SkipBack className="w-4 h-4 fill-current" />
+          </button>
+          <button onClick={handleNextTrack} aria-label="Siguiente canción o emisora" className="p-2 text-zinc-300 hover:text-white">
+            <SkipForward className="w-4 h-4 fill-current" />
           </button>
           <button
             onClick={togglePlay}
+            aria-label={isPlaying ? 'Pausar' : 'Reproducir'}
             className={`w-9 h-9 rounded-full ${accentClasses.bg} text-black flex items-center justify-center`}
           >
             {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
           </button>
         </div>
-      </div>
+        {currentTrack.sourceType !== 'radio' && <div className="mobile-deck__progress" aria-hidden="true"><span style={{ width: `${Math.min(100, Math.max(0, duration > 0 ? currentTime / duration * 100 : 0))}%` }} /></div>}
+      </div>}
 
       {/* PANTALLA COMPLETA NOW PLAYING EXPANDIDA EN CELULAR (ESTILO SPOTIFY MOBILE) */}
       {isMobileNowPlayingOpen && (
-        <div className="md:hidden fixed inset-0 z-50 bg-gradient-to-b from-[#181d28] via-[#0e1118] to-[#07080b] p-6 flex flex-col justify-between overflow-y-auto">
+        <div className="listening-room md:hidden fixed inset-0 z-50 bg-gradient-to-b from-[#181d28] via-[#0e1118] to-[#07080b] p-6 flex flex-col justify-between overflow-y-auto">
           {/* Cabecera modal */}
           <div className="flex items-center justify-between pt-2">
-            <button onClick={() => setIsMobileNowPlayingOpen(false)} className="p-2 text-zinc-400 hover:text-white">
+            <button aria-label="Cerrar reproductor" onClick={() => setIsMobileNowPlayingOpen(false)} className="p-2 text-zinc-400 hover:text-white">
               <ChevronDown className="w-6 h-6" />
             </button>
             <div className="text-center">
-              <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Reproduciendo</p>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-zinc-400">Tu sesión · {isPlaying ? 'Reproduciendo' : 'En pausa'}</p>
               <p className="text-xs font-semibold text-zinc-200">{currentTrack.album}</p>
             </div>
-            <button onClick={() => toggleOfflineVault(currentTrack.id)} className="p-2 text-emerald-400">
-              {currentTrack.cachedOffline ? <CheckCircle2 className="w-5 h-5" /> : <Download className="w-5 h-5" />}
+            <button onClick={() => toggleOfflineVault(currentTrack.id, undefined, currentTrack)} className="p-2 text-emerald-400">
+              {isDownloaded(currentTrack.id) ? <CheckCircle2 className="w-5 h-5" /> : <Download className="w-5 h-5" />}
             </button>
           </div>
 
@@ -4216,6 +4481,7 @@ export default function App() {
                 <>
                   <input
                     type="range"
+                    aria-label="Posición de reproducción"
                     min="0"
                     max={duration || currentTrack.duration}
                     value={currentTime}
@@ -4243,18 +4509,19 @@ export default function App() {
                 8D AUDIO
               </button>
 
-              <button onClick={handlePrevTrack} className="p-3 text-zinc-300 hover:text-white">
+              <button aria-label="Canción anterior" onClick={handlePrevTrack} className="p-3 text-zinc-300 hover:text-white">
                 <SkipBack className="w-7 h-7 fill-current" />
               </button>
 
               <button
                 onClick={togglePlay}
+                aria-label={isPlaying ? 'Pausar' : 'Reproducir'}
                 className={`w-16 h-16 rounded-full ${accentClasses.bg} text-black flex items-center justify-center shadow-xl transform active:scale-95 transition`}
               >
                 {isPlaying ? <Pause className="w-8 h-8 fill-current" /> : <Play className="w-8 h-8 fill-current ml-1" />}
               </button>
 
-              <button onClick={handleNextTrack} className="p-3 text-zinc-300 hover:text-white">
+              <button aria-label="Siguiente canción" onClick={handleNextTrack} className="p-3 text-zinc-300 hover:text-white">
                 <SkipForward className="w-7 h-7 fill-current" />
               </button>
 
@@ -4339,41 +4606,47 @@ export default function App() {
             {/* Indicador de Salida de Audio */}
             <div className="flex items-center justify-center gap-2 pt-2 text-xs text-zinc-400">
               <Headphones className="w-4 h-4 text-emerald-400" />
-              <span>Conectado a Audífonos / Intercomunicador</span>
+              <span>Compatible con audífonos e intercomunicadores</span>
             </div>
           </div>
         </div>
       )}
 
       {/* BARRA DE NAVEGACIÓN INFERIOR PARA CELULAR (SPOTIFY PRO LIMPIO) */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0B0D12]/98 backdrop-blur-xl border-t border-zinc-800/80 px-2 py-1.5 flex items-center justify-around">
+      <nav className="mobile-nav md:hidden fixed bottom-0 left-0 right-0 z-40 bg-[#0B0D12]/98 backdrop-blur-xl border-t border-zinc-800/80 px-1 py-1.5 flex items-center justify-around">
         {[
           { id: 'home', label: 'Inicio', icon: ListMusic },
           { id: 'search', label: 'Buscar', icon: Search },
           { id: 'playlists', label: 'Playlists', icon: FolderPlus },
           { id: 'favorites', label: 'Favoritas', icon: Heart },
           { id: 'radio', label: 'Radio', icon: Radio },
-          { id: 'dsp-studio', label: 'Ecualizador', icon: Sliders }
+          { id: 'dsp-studio', label: 'Ecualizador', icon: Sliders },
+          { id: 'vault', label: 'Descargas', icon: Download }
         ].map((item) => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
           return (
             <button
               key={item.id}
-              onClick={() => setActiveTab(item.id as ActiveTab)}
-              className={`flex flex-col items-center py-1 px-2 rounded-lg transition ${
+              onClick={() => {
+                setActiveTab(item.id as ActiveTab);
+                setIsSuggestionsOpen(false);
+                window.scrollTo({ top: 0, behavior: 'auto' });
+              }}
+              aria-current={isActive ? 'page' : undefined}
+              className={`flex flex-1 flex-col items-center min-w-0 py-1 px-1 rounded-lg transition ${
                 isActive ? accentClasses.text : 'text-zinc-500'
               }`}
             >
               <Icon className="w-5 h-5" />
-              <span className="text-[10px] font-semibold mt-0.5">{item.label}</span>
+              <span className="text-[9px] font-semibold mt-0.5 truncate max-w-full">{item.label}</span>
             </button>
           );
         })}
       </nav>
 
       {/* BARRA DE REPRODUCCIÓN INFERIOR PERSISTENTE (ESCRITORIO / DESKTOP) */}
-      <footer className="hidden md:block fixed bottom-0 left-0 right-0 z-40 bg-[#0C0E16]/95 backdrop-blur-xl border-t border-zinc-800/90 px-4 py-3">
+      {(musicSelection > 0 || activeAudioSource === 'radio') && <footer className="hidden md:block fixed bottom-0 left-0 right-0 z-40 bg-[#0C0E16]/95 backdrop-blur-xl border-t border-zinc-800/90 px-4 py-3">
         <div className="max-w-[1600px] mx-auto grid grid-cols-1 md:grid-cols-12 items-center gap-3">
           
           {/* Info canción */}
@@ -4406,13 +4679,13 @@ export default function App() {
                 <ListPlus className="w-4 h-4" />
               </button>
               <button
-                onClick={(e) => toggleOfflineVault(currentTrack.id, e)}
+                onClick={(e) => toggleOfflineVault(currentTrack.id, e, currentTrack)}
                 className={`p-1.5 rounded-lg ${
-                  currentTrack.cachedOffline ? 'text-emerald-400' : 'text-zinc-500 hover:text-white'
+                  isDownloaded(currentTrack.id) ? 'text-emerald-400' : 'text-zinc-500 hover:text-white'
                 }`}
                 title="Descargar offline"
               >
-                <CheckCircle2 className="w-4 h-4" />
+                {isDownloaded(currentTrack.id) ? <CheckCircle2 className="w-4 h-4" /> : <Download className="w-4 h-4" />}
               </button>
             </div>
           </div>
@@ -4547,7 +4820,7 @@ export default function App() {
             </div>
           </div>
         </div>
-      </footer>
+      </footer>}
 
       {/* ========================================== */}
       {/* MODAL: AÑADIR A PLAYLIST */}
@@ -4891,4 +5164,3 @@ export default function App() {
     </div>
   );
 }
-
