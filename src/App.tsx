@@ -1411,7 +1411,9 @@ export default function App() {
     }
   }, [currentTrack, musicSelection, activeAudioSource]);
 
-  useEffect(() => { updateMediaSessionPlaybackState(isPlaying); }, [isPlaying]);
+  useEffect(() => {
+    updateMediaSessionPlaybackState(isPlaying);
+  }, [isPlaying, currentTrack.id, musicSelection, activeAudioSource]);
 
   useEffect(() => {
     registerMediaSessionHandlers({
@@ -1613,6 +1615,10 @@ export default function App() {
       showToast('Esta canción no tiene un enlace de audio disponible. Búscala de nuevo.');
       return;
     }
+    // Reannounce the next track before replacing the ended media element.
+    // Android/Chrome may retire the previous Media Session at the track boundary.
+    updateMediaSessionMetadata(sourceTrack);
+    updateMediaSessionPlaybackState(true);
     if (!preserveQueue) updatePlaybackQueue(null);
     playbackTrackRef.current = sourceTrack;
     if (rememberPrevious && activeAudioSource === 'music' && hasSelectedMusicRef.current && currentMusicTrack.id !== track.id) {

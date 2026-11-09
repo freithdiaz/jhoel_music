@@ -23,6 +23,18 @@ test('Media Session publica pausa y reproducción sin alterarlas al cambiar meta
   }
 });
 
+test('restablece el estado playing si el navegador limpió la sesión al terminar una pista', () => {
+  const originalNavigator = globalThis.navigator;
+  const session = { playbackState: 'none' };
+  Object.defineProperty(globalThis, 'navigator', { value: { mediaSession: session }, configurable: true });
+  try {
+    media.updateMediaSessionPlaybackState(true);
+    assert.equal(session.playbackState, 'playing');
+  } finally {
+    Object.defineProperty(globalThis, 'navigator', { value: originalNavigator, configurable: true });
+  }
+});
+
 test('los botones físicos invocan acciones separadas de reproducción y pausa', () => {
   const originalNavigator = globalThis.navigator;
   const handlers = {};
