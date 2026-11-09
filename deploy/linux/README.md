@@ -2,6 +2,8 @@
 
 Esta guía deja la aplicación web/API y el puente de Telegram funcionando en un servidor Linux con HTTPS.
 
+> **Versión de referencia:** `v1.0.0-inicial` (2026-11-08), validada por el usuario en el piloto. Ver `docs/releases/v1.0.0-inicial.md`.
+
 > **Importante:** el puente de Telegram debe ejecutarse en el **mismo servidor y sistema de archivos** que la app. El puente publica los MP3 en `music/telegram-ready` y el contenedor los lee desde ahí. Un puente en otro PC no puede publicar archivos en el servidor sin un mecanismo de subida que este proyecto no incluye.
 
 ---
