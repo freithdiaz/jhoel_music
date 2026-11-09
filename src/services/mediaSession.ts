@@ -30,18 +30,18 @@ export function updateMediaSessionMetadata(track: Track) {
     ]
   });
 
-  try {
-    navigator.mediaSession.playbackState = 'playing';
-  } catch {
-    // ignorar si no soportado
-  }
+}
+
+export function updateMediaSessionPlaybackState(playing: boolean) {
+  if (!('mediaSession' in navigator)) return;
+  try { navigator.mediaSession.playbackState = playing ? 'playing' : 'paused'; } catch {}
 }
 
 export function updateMediaSessionPosition(currentTime: number, duration: number, playbackRate = 1.0) {
   if (!('mediaSession' in navigator) || !navigator.mediaSession.setPositionState) return;
 
   try {
-    if (duration > 0 && !isNaN(duration) && !isNaN(currentTime)) {
+    if (Number.isFinite(duration) && duration > 0 && Number.isFinite(currentTime) && Number.isFinite(playbackRate) && playbackRate > 0) {
       navigator.mediaSession.setPositionState({
         duration: Math.max(duration, 0.1),
         playbackRate: playbackRate,
@@ -104,4 +104,3 @@ export function releaseScreenWakeLock() {
     wakeLockSentinel = null;
   }
 }
-

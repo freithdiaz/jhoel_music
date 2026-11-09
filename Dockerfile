@@ -20,7 +20,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY --from=frontend /usr/local/bin/node /usr/local/bin/node
 COPY --from=frontend /build/dist ./dist
-COPY server.py production.py ./
+COPY server.py production.py telegram_app_guard.py telegram_bridge_queue.py telegram_deletion_queue.py telegram_match.py ./
 COPY isolated/ipc.py ./isolated/ipc.py
 COPY scripts ./scripts
 USER music

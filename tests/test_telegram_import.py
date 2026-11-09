@@ -1,4 +1,5 @@
-from telegram_import import MAX_AUDIO_BYTES, candidate_from_update, has_track_consent
+from telegram_import import (MAX_AUDIO_BYTES, approval_matches, approve_track,
+                             candidate_from_update, has_track_consent)
 
 
 def update():
@@ -41,3 +42,24 @@ def test_rejects_untrusted_audio_metadata():
     data = update()
     data['message']['document'] = data['message'].pop('audio')
     assert parse(data) is None
+
+
+def test_approval_is_bound_to_exact_candidate_and_expires():
+    candidate = parse(update())
+    approval = approve_track(candidate, message_id=7, rights_confirmed=True,
+                             now=100, expires_at=160)
+    assert approval_matches(approval, candidate, now=159)
+    assert not approval_matches(approval, candidate, now=99)
+    assert not approval_matches(approval, candidate, now=160)
+    data = update()
+    data['message']['audio']['file_id'] = 'other_file'
+    assert not approval_matches(approval, parse(data), now=101)
+
+
+def test_approval_rejects_invalid_confirmation_and_time():
+    candidate = parse(update())
+    for now, expiry in [(100, 100), (100, 401), (True, 101), (100, float('nan'))]:
+        assert approve_track(candidate, message_id=7, rights_confirmed=True,
+                             now=now, expires_at=expiry) is None
+    assert approve_track(candidate, message_id=7, rights_confirmed=1,
+                         now=100, expires_at=101) is None

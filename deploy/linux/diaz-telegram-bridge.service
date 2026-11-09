@@ -1,0 +1,27 @@
+[Unit]
+Description=Diaz Music - puente de Telegram
+Requires=docker.service
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=diaz
+SupplementaryGroups=docker
+WorkingDirectory=/opt/diaz-music
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/opt/diaz-music/deploy/linux/bridge.env
+ExecStart=/opt/diaz-music/.venv/bin/python -u telegram_windows_bridge.py --serve
+Restart=on-failure
+RestartSec=10
+UMask=0022
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/opt/diaz-music/music /var/lib/diaz-music
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

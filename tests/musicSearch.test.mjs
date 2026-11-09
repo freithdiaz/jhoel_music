@@ -16,6 +16,20 @@ test('YouTube no consulta sugerencias externas', async () => {
   assert.equal(requested, false);
 });
 
+test('el buscador de YouTube pide sugerencias al servidor', async () => {
+  const requests = [];
+  globalThis.fetch = async url => {
+    requests.push(String(url));
+    return json(['Feid', 'Feid canciones', 'Feid y Maisak']);
+  };
+  assert.deepEqual(
+    await fetchSearchSuggestions('fe', 'https://servidor.test/api', 'stream'),
+    ['Feid', 'Feid canciones', 'Feid y Maisak']
+  );
+  assert.equal(requests.length, 1);
+  assert.match(requests[0], /\/suggestions\?q=fe$/);
+});
+
 test('busca Jamendo primero y no llama al servidor de YouTube', async () => {
   const requests = [];
   globalThis.fetch = async url => { requests.push(String(url)); if (String(url).includes('api.jamendo.com')) return json({ results: [jamendoTrack, { ...jamendoTrack, id: 'missing', audio: '' }] }); throw new Error('Solicitud inesperada'); };

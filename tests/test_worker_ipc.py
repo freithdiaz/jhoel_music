@@ -71,7 +71,7 @@ def test_search_ipc_and_validation(tmp_path, monkeypatch):
     thread.start()
     try:
         assert ipc.search('song', 1, path) == {'status': 'ok', 'results': [entry]}
-        for query, limit in [('', 1), ('x' * 161, 1), ('https://example.com', 1), ('song', True), ('song', 11)]:
+        for query, limit in [('', 1), ('x' * 161, 1), ('https://example.com', 1), ('song', True), ('song', 51)]:
             with pytest.raises(ValueError):
                 ipc.search(query, limit, path)
         monkeypatch.setattr(worker, 'search', lambda query, limit: [dict(entry, url='https://example.com/?secret=x')])

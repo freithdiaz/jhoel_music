@@ -1,0 +1,13 @@
+# Piloto local aislado: combinar con compose.yaml y compose.telegram.yaml.
+# La clave debe venir del entorno del proceso, nunca escribirse en este archivo.
+services:
+  music:
+    environment:
+      MUSIC_TELEGRAM_ENABLED: "1"
+      MUSIC_TELEGRAM_OPERATOR: ${MUSIC_TELEGRAM_OPERATOR:?Operador requerido}
+      MUSIC_TELEGRAM_BRIDGE_KEY: ${MUSIC_TELEGRAM_BRIDGE_KEY:?Clave requerida}
+      MUSIC_TELEGRAM_PILOT_READY: "1"
+      MUSIC_ENABLE_LOCAL_LIBRARY: "true"
+      MUSIC_DB_PATH: /pilot/diaz_music_users.db
+    volumes:
+      - ${MUSIC_TELEGRAM_PILOT_DATA:?Directorio requerido}:/pilot

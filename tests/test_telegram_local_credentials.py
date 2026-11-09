@@ -64,7 +64,28 @@ def test_redirect_refused():
         helper.NoRedirect().redirect_request(None, None, 302, '', {}, 'https://example.org')
 
 
+def test_env_credentials_take_precedence(monkeypatch, tmp_path):
+    monkeypatch.setattr(helper, '__file__', str(tmp_path / 'helper.py'))
+    (tmp_path / '.env').write_text('Api_id=123\nApi_hash="' + 'a' * 32 + '"\ntoken_telegram=12:abc_DEF\n')
+    monkeypatch.setenv('TELEGRAM_API_ID', '456')
+    monkeypatch.setenv('TELEGRAM_API_HASH', 'b' * 32)
+    monkeypatch.setenv('TELEGRAM_BOT_TOKEN', '34:env_TOKEN')
+    assert helper.read_credentials() == (456, 'b' * 32, '34:env_TOKEN')
+    assert helper.read_bot_token() == '34:env_TOKEN'
+
+
+def test_partial_env_credentials_are_rejected(monkeypatch):
+    monkeypatch.setenv('TELEGRAM_API_ID', '456')
+    monkeypatch.delenv('TELEGRAM_API_HASH', raising=False)
+    monkeypatch.delenv('TELEGRAM_BOT_TOKEN', raising=False)
+    with pytest.raises(helper.Refused):
+        helper.read_credentials()
+
+
 def test_env_is_strict_and_memory_only(monkeypatch, tmp_path):
+    monkeypatch.delenv('TELEGRAM_API_ID', raising=False)
+    monkeypatch.delenv('TELEGRAM_API_HASH', raising=False)
+    monkeypatch.delenv('TELEGRAM_BOT_TOKEN', raising=False)
     monkeypatch.setattr(helper, '__file__', str(tmp_path / 'helper.py'))
     path = tmp_path / '.env'
     path.write_text('Api_id=123\nApi_hash="' + 'a' * 32 + '"\ntoken_telegram=12:abc_DEF\n')
@@ -77,6 +98,7 @@ def test_env_is_strict_and_memory_only(monkeypatch, tmp_path):
 @pytest.mark.parametrize(('contents', 'expected'), [('', None), ('TELEGRAM_PHONE=\n', None),
     ('TELEGRAM_PHONE="+15551234567"\n', '+15551234567')])
 def test_optional_phone_local_only(monkeypatch, tmp_path, contents, expected):
+    monkeypatch.delenv('TELEGRAM_PHONE', raising=False)
     monkeypatch.setattr(helper, '__file__', str(tmp_path / 'helper.py'))
     (tmp_path / '.env').write_text(contents)
     assert helper.read_optional_phone() == expected
@@ -85,6 +107,7 @@ def test_optional_phone_local_only(monkeypatch, tmp_path, contents, expected):
 @pytest.mark.parametrize('contents', ['TELEGRAM_PHONE=invalid\n',
     'TELEGRAM_PHONE=+15551234567\nTELEGRAM_PHONE=+15551234567\n'])
 def test_optional_phone_rejects_invalid_or_ambiguous(monkeypatch, tmp_path, contents):
+    monkeypatch.delenv('TELEGRAM_PHONE', raising=False)
     monkeypatch.setattr(helper, '__file__', str(tmp_path / 'helper.py'))
     (tmp_path / '.env').write_text(contents)
     with pytest.raises(helper.Refused):

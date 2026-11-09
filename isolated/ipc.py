@@ -13,7 +13,7 @@ SOCKET = '/run/worker/worker.sock'
 MAX_MESSAGE = 65536
 VIDEO_ID = re.compile(r'[A-Za-z0-9_-]{11}\Z')
 MAX_QUERY = 160
-MAX_RESULTS = 10
+MAX_RESULTS = 50
 
 
 def validate_url(url):

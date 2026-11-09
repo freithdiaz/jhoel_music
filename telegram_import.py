@@ -8,7 +8,10 @@ from dataclasses import dataclass
 
 
 MAX_AUDIO_BYTES = 20 * 1024 * 1024
-ALLOWED_AUDIO_TYPES = frozenset({'audio/mpeg', 'audio/mp4', 'audio/m4a', 'audio/ogg', 'audio/flac', 'audio/wav'})
+ALLOWED_AUDIO_TYPES = frozenset({
+    'audio/mpeg', 'audio/mp3', 'audio/mp4', 'audio/m4a', 'audio/x-m4a',
+    'audio/ogg', 'audio/flac', 'audio/wav', 'application/octet-stream',
+})
 
 
 @dataclass(frozen=True)
@@ -50,3 +53,38 @@ def has_track_consent(candidate, *, message_id, rights_confirmed):
     """La declaración es por mensaje, no una verificación de derechos."""
     return (isinstance(candidate, Candidate) and type(message_id) is int
             and message_id == candidate.message_id and rights_confirmed is True)
+
+
+@dataclass(frozen=True)
+class TrackApproval:
+    """Declaración local ligada al candidato; no autentica al operador."""
+    candidate: Candidate
+    issued_at: float
+    expires_at: float
+
+
+def approve_track(candidate, *, message_id, rights_confirmed, now, expires_at):
+    """Crea una aprobación temporal; el reloj debe provenir del llamador confiable."""
+    import math
+
+    if (not has_track_consent(candidate, message_id=message_id, rights_confirmed=rights_confirmed)
+            or type(now) not in (int, float) or type(expires_at) not in (int, float)
+            or not math.isfinite(now) or not math.isfinite(expires_at)
+            or not now < expires_at <= now + 300):
+        return None
+    return TrackApproval(candidate, now, expires_at)
+
+
+def approval_matches(approval, candidate, *, now):
+    """Rechaza expiración o cambio de cualquier metadato del candidato."""
+    import math
+
+    return (isinstance(approval, TrackApproval) and isinstance(candidate, Candidate)
+            and type(now) in (int, float) and math.isfinite(now)
+            and type(approval.issued_at) in (int, float)
+            and math.isfinite(approval.issued_at)
+            and type(approval.expires_at) in (int, float)
+            and math.isfinite(approval.expires_at)
+            and approval.issued_at <= now < approval.expires_at
+            and approval.expires_at <= approval.issued_at + 300
+            and candidate == approval.candidate)

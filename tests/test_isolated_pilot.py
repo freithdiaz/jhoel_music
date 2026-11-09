@@ -4,15 +4,15 @@ import threading
 from unittest.mock import Mock, patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, Response
 from starlette.requests import Request
 
 import server
 from isolated import ipc
 
 
-def request(headers=(), peer='127.0.0.1', host=b'localhost'):
-    return Request({'type': 'http', 'method': 'GET', 'path': '/stream_yt',
+def request(headers=(), peer='127.0.0.1', host=b'localhost', path='/stream_yt'):
+    return Request({'type': 'http', 'method': 'GET', 'path': path,
                     'scheme': 'http', 'server': ('localhost', 80),
                     'client': (peer, 1234), 'headers': [(b'host', host), *headers]})
 
@@ -75,13 +75,125 @@ def test_pilot_denies_nonlocal_requests(monkeypatch, peer, host, origin):
     assert response.status_code == 403
 
 
+def test_search_accepts_docker_private_peer_with_local_host(monkeypatch):
+    monkeypatch.setenv('MUSIC_TELEGRAM_PILOT_READY', '1')
+    monkeypatch.delenv('MUSIC_ISOLATED_PILOT', raising=False)
+    async def next_handler(req):
+        return Response(status_code=200)
+
+    allowed = asyncio.run(server.restrict_pilot_to_loopback(
+        request(peer='172.17.0.1', path='/search_online'), next_handler))
+    assert allowed.status_code == 200
+
+    local_origin = asyncio.run(server.restrict_pilot_to_loopback(
+        request(headers=[(b'origin', b'http://127.0.0.1:8589')], peer='127.0.0.1',
+                path='/search_online'), next_handler))
+    assert local_origin.status_code == 200
+
+    remote_host = asyncio.run(server.restrict_pilot_to_loopback(
+        request(peer='172.17.0.1', host=b'evil.test', path='/search_online'), next_handler))
+    assert remote_host.status_code == 403
+
+    public_peer = asyncio.run(server.restrict_pilot_to_loopback(
+        request(peer='8.8.8.8', path='/search_online'), next_handler))
+    assert public_peer.status_code == 403
+
+
 def test_search_uses_worker(monkeypatch):
     monkeypatch.setenv('MUSIC_ISOLATED_PILOT', '1')
     result = {'status': 'ok', 'results': [{'video_id': 'abcdefghijk', 'title': 'Song', 'artist': 'Artist', 'duration': 10}]}
     with patch.object(server.worker_ipc, 'search', return_value=result) as search, \
          patch.object(server.yt_dlp, 'YoutubeDL', side_effect=AssertionError):
         assert server.search_online('song', 25)[0]['audioUrl'] == '/stream_yt?v=abcdefghijk'
-        assert search.call_args.args == ('song', 10)
+        assert search.call_args.args == ('song', 25)
+
+
+def test_search_accepts_configured_public_origin(monkeypatch):
+    monkeypatch.setenv('MUSIC_TELEGRAM_PILOT_READY', '1')
+    monkeypatch.delenv('MUSIC_ISOLATED_PILOT', raising=False)
+    monkeypatch.setenv('MUSIC_PUBLIC_ORIGIN', 'https://music.example.com/')
+    async def next_handler(req):
+        return Response(status_code=200)
+
+    allowed = asyncio.run(server.restrict_pilot_to_loopback(
+        request(headers=[(b'origin', b'https://music.example.com')], peer='127.0.0.1',
+                path='/search_online'), next_handler))
+    assert allowed.status_code == 200
+
+    denied = asyncio.run(server.restrict_pilot_to_loopback(
+        request(headers=[(b'origin', b'https://evil.test')], peer='127.0.0.1',
+                path='/search_online'), next_handler))
+    assert denied.status_code == 403
+
+
+def test_search_allows_fifty_results_and_rejects_more(monkeypatch):
+    monkeypatch.setenv('MUSIC_TELEGRAM_PILOT_READY', '1')
+    monkeypatch.delenv('MUSIC_ISOLATED_PILOT', raising=False)
+    result = {'status': 'ok', 'results': [
+        {'video_id': 'abcdefghijk', 'title': 'Song', 'artist': 'Artist', 'duration': 10}]}
+    with patch.object(server.worker_ipc, 'search', return_value=result) as search:
+        assert server.search_online('song', 50)[0]['id'] == 'yt-abcdefghijk'
+        assert search.call_args.args == ('song', 50)
+    with pytest.raises(HTTPException) as error:
+        server.search_online('song', 51)
+    assert error.value.status_code == 422
+
+
+def test_search_falls_back_to_direct_ytdlp_without_downloading_audio(monkeypatch):
+    monkeypatch.setenv('MUSIC_ISOLATED_PILOT', '1')
+
+    class FakeYDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, query, download=False):
+            assert query == 'ytsearch10:romeo santos'
+            assert download is False
+            return {'entries': [
+                {'id': 'abcdefghijk', 'title': 'Imitadora', 'artist': None,
+                 'uploader': 'Romeo Santos', 'duration': 235.0},
+                {'id': 'invalid', 'title': 'x', 'artist': 'y', 'duration': 1},
+            ]}
+
+    with patch.object(server.worker_ipc, 'search', side_effect=OSError('missing socket')), \
+         patch.object(server.yt_dlp, 'YoutubeDL', FakeYDL):
+        results = server.search_online('romeo santos', 10)
+    assert len(results) == 1
+    assert results[0]['id'] == 'yt-abcdefghijk'
+    assert results[0]['artist'] == 'Romeo Santos'
+    assert results[0]['duration'] == 235
+
+
+def test_search_returns_502_when_worker_and_direct_search_fail(monkeypatch):
+    monkeypatch.setenv('MUSIC_ISOLATED_PILOT', '1')
+    with patch.object(server.worker_ipc, 'search', side_effect=OSError('missing socket')), \
+         patch.object(server.yt_dlp, 'YoutubeDL', side_effect=RuntimeError('blocked')):
+        with pytest.raises(HTTPException) as error:
+            server.search_online('romeo santos', 10)
+    assert error.value.status_code == 502
+
+
+def test_search_is_enabled_by_telegram_pilot_without_isolated_worker(monkeypatch):
+    monkeypatch.delenv('MUSIC_ISOLATED_PILOT', raising=False)
+    monkeypatch.setenv('MUSIC_TELEGRAM_PILOT_READY', '1')
+    result = {'status': 'ok', 'results': [
+        {'video_id': 'abcdefghijk', 'title': 'Song', 'artist': 'Artist', 'duration': 10}]}
+    with patch.object(server.worker_ipc, 'search', return_value=result):
+        assert server.search_online('song', 10)[0]['id'] == 'yt-abcdefghijk'
+
+
+def test_search_stays_disabled_without_a_pilot_flag(monkeypatch):
+    monkeypatch.delenv('MUSIC_ISOLATED_PILOT', raising=False)
+    monkeypatch.delenv('MUSIC_TELEGRAM_PILOT_READY', raising=False)
+    with pytest.raises(HTTPException) as error:
+        server.search_online('song', 10)
+    assert error.value.status_code == 503
 
 
 @pytest.mark.skipif(not hasattr(socket, 'AF_UNIX'), reason='Unix sockets required')

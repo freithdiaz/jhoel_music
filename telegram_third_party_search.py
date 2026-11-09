@@ -58,12 +58,13 @@ def classify(message, group_id, bot_id, sent_id):
             'con medio' if message.media is not None else 'sin medio')
 
 
-async def search_once(client, group, group_id, bot_id, query, *, candidates=None, sent_ids=None):
+async def search_once(client, group, group_id, bot_id, query, *, candidates=None, sent_ids=None, early_stop=False):
     from telethon import events
 
     command = search_command(query)
     sent_id = None
     observations = []
+    response_ready = asyncio.Event()
 
     async def receive(event):
         if len(observations) >= MAX_OBSERVATIONS:
@@ -74,6 +75,8 @@ async def search_once(client, group, group_id, bot_id, query, *, candidates=None
                 observations.append(item)
                 if candidates is not None:
                     candidates.append(event.message)
+                if early_stop and item[1] == 'sin medio' and getattr(event.message, 'reply_markup', None) is not None:
+                    response_ready.set()
         except Exception:
             pass
 
@@ -86,7 +89,15 @@ async def search_once(client, group, group_id, bot_id, query, *, candidates=None
         sent_id = sent.id
         if sent_ids is not None:
             sent_ids.append(sent_id)
-        await asyncio.sleep(WINDOW_SECONDS)
+        if early_stop:
+            try:
+                await asyncio.wait_for(response_ready.wait(), WINDOW_SECONDS)
+                # Breve margen para respuestas casi simultáneas; la vista sigue siendo no exhaustiva.
+                await asyncio.sleep(1)
+            except asyncio.TimeoutError:
+                pass
+        else:
+            await asyncio.sleep(WINDOW_SECONDS)
     finally:
         client.remove_event_handler(receive, handler)
     return observations

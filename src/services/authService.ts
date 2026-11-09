@@ -154,7 +154,7 @@ function storeServerSession(username: string, server: string, token: string): vo
   localStorage.setItem(SESSION_KEY, JSON.stringify({ username, server, token }));
 }
 
-function getServerToken(username: string, server: string): string | null {
+export function getServerToken(username: string, server: string): string | null {
   try {
     const session = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null');
     return session?.username === username && session?.server === server ? session.token : null;

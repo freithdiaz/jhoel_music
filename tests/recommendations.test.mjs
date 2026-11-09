@@ -27,6 +27,14 @@ test('merengue y pop siguen su propio contexto', () => {
   assert.deepEqual(rankRelated([feid, maroon], ed, taste, []).map(t => t.id), ['maroon']);
 });
 
+test('reconoce bachata de metadatos y no inventa género ausente', () => {
+  const bachata = track('a', 'Romeo Santos', 'Bachata', 'Imitadora');
+  const another = track('b', 'Otro artista', 'Bachata');
+  assert.equal(trackGenre(bachata), 'bachata');
+  assert.deepEqual(rankRelated([another], bachata, taste, []).map(t => t.id), ['b']);
+  assert.equal(trackGenre(track('c', 'Desconocido', 'Sin género')), '');
+});
+
 test('prefiere Jamendo a YouTube entre pistas relacionadas', () => {
   const current = track('actual', 'Ed Sheeran', 'Pop');
   const youtube = { ...track('yt-123', 'Ed Sheeran', 'Pop'), sourceType: 'invidious', audioUrl: '/api/stream_yt?v=123' };

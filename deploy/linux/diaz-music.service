@@ -1,0 +1,21 @@
+[Unit]
+Description=Diaz Music (contenedor web/API)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=diaz
+SupplementaryGroups=docker
+WorkingDirectory=/opt/diaz-music/deploy/linux
+Environment=COMPOSE_PROJECT_NAME=diaz-music
+ExecStart=/usr/bin/docker compose up -d --build
+ExecStop=/usr/bin/docker compose down
+TimeoutStartSec=0
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

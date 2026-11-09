@@ -1,0 +1,8 @@
+# Opt-in: monta solo las copias validadas, sin modificar el volumen principal.
+# No habilita por sí solo la publicación HTTP de la biblioteca local.
+services:
+  music:
+    environment:
+      MUSIC_TELEGRAM_IMPORTED_DIR: /telegram-imported
+    volumes:
+      - ./music/telegram-ready:/telegram-imported:ro

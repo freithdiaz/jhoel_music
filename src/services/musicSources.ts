@@ -10,11 +10,11 @@ export function trackSourcePriority(track: Track): number {
 }
 
 export function trackSourceLabel(track: Track): string {
-  if (track.sourceType === 'youtube') return 'YouTube · reproductor oficial';
+  if (track.sourceType === 'youtube') return 'YouTube · descarga vía Telegram';
   if (track.sourceType === 'itunes' || track.id.startsWith('itunes-')) return 'iTunes · vista previa';
   if (track.sourceType === 'jamendo') return 'Jamendo';
   if (track.sourceType === 'audius') return 'Audius';
-  if (track.id.startsWith('yt-') || /\/stream_yt(?:\?|$)/.test(track.audioUrl || '')) return 'YouTube · puede no estar disponible';
+  if (track.id.startsWith('yt-') || /\/stream_yt(?:\?|$)/.test(track.audioUrl || '')) return 'YouTube · descarga vía Telegram';
   if (track.sourceType === 'local-file') return 'Archivo local';
   if (track.sourceType === 'fastapi') return 'Biblioteca del servidor';
   if (track.sourceType === 'radio') return 'Radio en vivo';

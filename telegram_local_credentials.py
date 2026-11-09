@@ -1,6 +1,7 @@
 """Optional local credential discovery. Never invoked without explicit consent."""
 
 import json
+import os
 import re
 import urllib.request
 from pathlib import Path
@@ -10,8 +11,20 @@ class Refused(ValueError):
     pass
 
 
+def _env_value(name):
+    value = os.environ.get(name, '').strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    return value
+
+
 def read_optional_phone():
     """Read only the optional local phone, without expanding or logging it."""
+    env_phone = _env_value('TELEGRAM_PHONE')
+    if env_phone:
+        if not re.fullmatch(r'\+[1-9][0-9]{1,14}', env_phone):
+            raise Refused('Configuración telefónica inválida')
+        return env_phone
     values = []
     for line in (Path(__file__).resolve().parent / '.env').read_text(encoding='utf-8-sig').splitlines():
         line = line.strip()
@@ -34,29 +47,60 @@ def read_optional_phone():
 
 
 def read_credentials():
-    # Intentionally do not expand variables, execute shell syntax, or alter os.environ.
-    values = {}
-    for line in (Path(__file__).resolve().parent / '.env').read_text(encoding='utf-8-sig').splitlines():
-        line = line.strip()
-        if not line or line.startswith('#') or '=' not in line:
-            continue
-        key, value = line.split('=', 1)
-        key, value = key.strip(), value.strip()
-        if key not in ('Api_id', 'Api_hash', 'token_telegram'):
-            continue
-        if key in values:
-            raise Refused('Credenciales ambiguas')
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
-        values[key] = value
-    api_id = values.get('Api_id', '')
-    api_hash = values.get('Api_hash', '')
-    token = values.get('token_telegram', '')
+    # Environment variables (systemd EnvironmentFile) take precedence over .env.
+    env_api_id = _env_value('TELEGRAM_API_ID')
+    env_api_hash = _env_value('TELEGRAM_API_HASH')
+    env_token = _env_value('TELEGRAM_BOT_TOKEN')
+    if env_api_id or env_api_hash or env_token:
+        api_id, api_hash, token = env_api_id, env_api_hash, env_token
+    else:
+        # Intentionally do not expand variables, execute shell syntax, or alter os.environ.
+        values = {}
+        for line in (Path(__file__).resolve().parent / '.env').read_text(encoding='utf-8-sig').splitlines():
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            key, value = key.strip(), value.strip()
+            if key not in ('Api_id', 'Api_hash', 'token_telegram'):
+                continue
+            if key in values:
+                raise Refused('Credenciales ambiguas')
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            values[key] = value
+        api_id = values.get('Api_id', '')
+        api_hash = values.get('Api_hash', '')
+        token = values.get('token_telegram', '')
     if (not re.fullmatch(r'[0-9]+', api_id) or int(api_id) <= 0
             or not re.fullmatch(r'[0-9a-fA-F]{32}', api_hash)
             or not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]+', token)):
         raise Refused('Credenciales inválidas')
     return int(api_id), api_hash, token
+
+
+def read_bot_token():
+    """Lee solo el token para pruebas Bot API, sin exigir credenciales MTProto."""
+    env_token = _env_value('TELEGRAM_BOT_TOKEN')
+    if env_token:
+        if not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]+', env_token):
+            raise Refused('Token ausente, ambiguo o inválido')
+        return env_token
+    values = []
+    for line in (Path(__file__).resolve().parent / '.env').read_text(encoding='utf-8-sig').splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        if key.strip() != 'token_telegram':
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values.append(value)
+    if len(values) != 1 or not re.fullmatch(r'[0-9]+:[A-Za-z0-9_-]+', values[0]):
+        raise Refused('Token ausente, ambiguo o inválido')
+    return values[0]
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):

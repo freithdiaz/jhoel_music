@@ -69,6 +69,28 @@ def test_search_registers_before_one_send_and_removes_handler(monkeypatch):
     assert client.calls == 1 and client.removed
 
 
+def test_early_search_returns_after_verified_sender_supplies_buttons():
+    class Client:
+        def add_event_handler(self, fn, event):
+            self.fn, self.event = fn, event
+
+        async def send_message(self, group, query):
+            answer = message(reply=MessageReplyHeader(reply_to_msg_id=7))
+            answer.reply_markup = SimpleNamespace()
+            asyncio.get_running_loop().call_soon(lambda: asyncio.create_task(self.fn(SimpleNamespace(message=answer))))
+            return SimpleNamespace(id=7)
+
+        def remove_event_handler(self, fn, event):
+            self.removed = True
+
+    client = Client()
+    async def run():
+        return await asyncio.wait_for(search.search_once(client, object(), -10, 42, 'canción', early_stop=True), 4)
+    # La respuesta puede llegar antes de que send_message devuelva el ID.
+    assert asyncio.run(run()) == [('indeterminado', 'sin medio')]
+    assert client.removed
+
+
 @pytest.mark.parametrize('query', ['', ' /other', 'a\nb', 'a\rb', 'a\tb',
                                    'a\x00b', 'a\x9bb', 'a\u2028b', 'x' * 201])
 def test_invalid_query_never_registers_or_sends(query):

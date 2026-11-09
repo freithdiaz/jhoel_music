@@ -25,13 +25,16 @@ import queue
 from contextlib import closing
 from pathlib import Path
 from typing import List, Optional, Dict
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictBool
 from fastapi import FastAPI, HTTPException, Request, status, Query, Header
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 import yt_dlp
 from dotenv import load_dotenv
 from isolated import ipc as worker_ipc
+from telegram_app_guard import operator_allowed
+from telegram_bridge_queue import BridgeQueue, BridgeQueueError
+from telegram_deletion_queue import DeletionQueue, DeletionError
 
 # Opcional: configurar la variable YOUTUBE_API_KEY en el .env del proyecto;
 # las variables explícitas del proceso tienen prioridad.
@@ -42,19 +45,36 @@ app = FastAPI(title="Thomas Music Universal Streamer", version="2.7.0")
 def pilot_enabled():
     return os.environ.get('MUSIC_ISOLATED_PILOT') == '1'
 
+
+def youtube_search_enabled():
+    """La búsqueda de metadatos puede funcionar en el piloto aunque no haya worker.
+
+    No habilita la descarga ni el streaming de YouTube; solo `/search_online`.
+    """
+    return pilot_enabled() or os.environ.get('MUSIC_TELEGRAM_PILOT_READY') == '1'
+
+
 @app.middleware('http')
 async def restrict_pilot_to_loopback(request, call_next):
-    if pilot_enabled() and request.url.path.rstrip('/').split('/')[-1] in ('stream_yt', 'search_online'):
-        try:
-            peer = ipaddress.ip_address(request.client.host)
-            host = request.url.hostname
-            if not peer.is_loopback or host not in ('localhost', '127.0.0.1', '::1'):
-                return JSONResponse(status_code=403, content={'detail': 'Acceso local únicamente'})
-            origin = request.headers.get('origin')
-            if origin and origin not in ('http://localhost:5173', 'http://127.0.0.1:5173'):
-                return JSONResponse(status_code=403, content={'detail': 'Origen no permitido'})
-        except (ValueError, AttributeError):
+    path = request.url.path.rstrip('/').split('/')[-1]
+    if not youtube_search_enabled() or path not in ('stream_yt', 'search_online'):
+        return await call_next(request)
+    try:
+        peer = ipaddress.ip_address(request.client.host)
+        host = request.url.hostname
+        origin = request.headers.get('origin')
+        # Dentro de Docker la petición llega desde la red privada del puente.
+        # Solo se tolera para la búsqueda de metadatos; stream_yt sigue
+        # exigiendo loopback. El puerto del piloto permanece ligado a 127.0.0.1.
+        peer_allowed = peer.is_loopback or (path == 'search_online' and peer.is_private)
+        if not peer_allowed or host not in ('localhost', '127.0.0.1', '::1'):
             return JSONResponse(status_code=403, content={'detail': 'Acceso local únicamente'})
+        if origin and urllib.parse.urlsplit(origin).hostname not in ('localhost', '127.0.0.1', '::1'):
+            public_origin = os.environ.get('MUSIC_PUBLIC_ORIGIN', '').rstrip('/')
+            if not public_origin or origin.rstrip('/') != public_origin:
+                return JSONResponse(status_code=403, content={'detail': 'Origen no permitido'})
+    except (ValueError, AttributeError):
+        return JSONResponse(status_code=403, content={'detail': 'Acceso local únicamente'})
     return await call_next(request)
 
 app.add_middleware(
@@ -74,6 +94,10 @@ SUPPORTED_EXTENSIONS = {".mp3", ".flac", ".wav", ".m4a", ".ogg"}
 STREAM_CACHE: Dict[str, tuple] = {}
 STREAM_LOCKS = [threading.Lock() for _ in range(64)]
 SEARCH_SLOTS = threading.BoundedSemaphore(6)
+TELEGRAM_BRIDGE_QUEUE = BridgeQueue(clock=time.monotonic)
+TELEGRAM_DELETION_QUEUE = DeletionQueue(clock=time.monotonic)
+TELEGRAM_BRIDGE_HEARTBEAT_LOCK = threading.Lock()
+TELEGRAM_BRIDGE_HEARTBEAT = {'at': 0.0, 'ready': False}
 
 class SilentYdlLogger:
     def debug(self, message): pass
@@ -99,6 +123,41 @@ YDL_STREAM_OPTS = {
     'skip_download': True,
     'js_runtimes': {'node': {}}, 'socket_timeout': 8, 'retries': 0, 'ignoreconfig': True, 'logger': SilentYdlLogger(),
 }
+
+
+def direct_youtube_search(query, limit):
+    """Busca metadatos en YouTube sin descargar audio.
+
+    Respaldo para el piloto cuando el worker aislado no está disponible.
+    Solo devuelve entradas validadas y acotadas; no resuelve ni descarga
+    URLs de audio.
+    """
+    with yt_dlp.YoutubeDL(YDL_FAST_SEARCH_OPTS) as ydl:
+        info = ydl.extract_info(f'ytsearch{limit}:{query}', download=False)
+    entries = info.get('entries') if isinstance(info, dict) else None
+    results = []
+    for entry in entries or []:
+        if not isinstance(entry, dict) or len(results) >= limit:
+            continue
+        video_id = entry.get('id')
+        title = entry.get('title')
+        artist = entry.get('artist') or entry.get('uploader') or entry.get('channel') or 'YouTube'
+        duration = entry.get('duration')
+        if not (isinstance(video_id, str) and re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id)):
+            continue
+        if not worker_ipc.valid_text(title, 200):
+            continue
+        if not worker_ipc.valid_text(artist, 200):
+            artist = 'YouTube'
+        try:
+            duration = int(duration)
+        except (TypeError, ValueError):
+            duration = 0
+        if not 0 <= duration <= 86400:
+            duration = 0
+        results.append({'video_id': video_id, 'title': title,
+                        'artist': artist, 'duration': duration})
+    return results
 
 def valid_video_id(video_id: str) -> bool:
     return isinstance(video_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id) is not None
@@ -311,6 +370,340 @@ def require_user(authorization: Optional[str]) -> str:
     if not row:
         raise HTTPException(status_code=401, detail="Sesión inválida o vencida")
     return row[0]
+
+
+def require_telegram_operator(authorization: Optional[str]) -> str:
+    """Autentica antes de aplicar la lista de operador; no activa Telegram."""
+    username = require_user(authorization)
+    if not operator_allowed(
+        enabled=os.environ.get('MUSIC_TELEGRAM_ENABLED') == '1',
+        configured_operator=os.environ.get('MUSIC_TELEGRAM_OPERATOR'),
+        authenticated_user=username,
+    ):
+        raise HTTPException(status_code=403, detail='Integración Telegram no autorizada')
+    return username
+
+
+@app.get('/telegram/status')
+def telegram_status(authorization: Optional[str] = Header(default=None)):
+    require_telegram_operator(authorization)
+    with TELEGRAM_BRIDGE_HEARTBEAT_LOCK:
+        heartbeat = dict(TELEGRAM_BRIDGE_HEARTBEAT)
+    elapsed = time.monotonic() - heartbeat['at']
+    directory = os.environ.get('MUSIC_TELEGRAM_IMPORTED_DIR', '')
+    ready = (os.environ.get('MUSIC_TELEGRAM_PILOT_READY') == '1'
+             and os.environ.get('MUSIC_ENABLE_LOCAL_LIBRARY') == 'true'
+             and bool(directory) and Path(directory).is_dir()
+             and heartbeat['ready'] is True and 0 <= elapsed < 90)
+    return {'ready': ready, 'detail': 'Puente disponible para prueba' if ready else 'Integración en preparación'}
+
+
+def require_telegram_bridge(key: Optional[str]) -> None:
+    """Credencial distinta a la sesión del usuario; nunca devolverla ni registrarla."""
+    expected = os.environ.get('MUSIC_TELEGRAM_BRIDGE_KEY', '')
+    if (os.environ.get('MUSIC_TELEGRAM_ENABLED') != '1'
+            or not re.fullmatch(r'[A-Za-z0-9_-]{43,128}', expected)
+            or not isinstance(key, str) or not key.isascii()
+            or not hmac.compare_digest(key, expected)):
+        raise HTTPException(status_code=403, detail='Puente no autorizado')
+
+
+class TelegramImportTarget(BaseModel):
+    title: str
+    artist: str = ''
+    album: str = ''
+    duration: Optional[float] = None
+
+
+class TelegramSearchRequest(BaseModel):
+    query: str
+    client_id: Optional[str] = None
+    target: Optional[TelegramImportTarget] = None
+    auto_select: StrictBool = False
+
+
+class TelegramBridgeResult(BaseModel):
+    identifier: str
+    results: Optional[list[dict]] = None
+    failed: bool = False
+
+
+class TelegramSelectionRequest(BaseModel):
+    result_id: str
+    accepts_group_publication: StrictBool
+    accepts_uncertainty: StrictBool
+    rights_confirmed: StrictBool
+    auto_download: StrictBool = False
+
+
+class TelegramSelectionCheck(BaseModel):
+    identifier: str
+    verified: StrictBool
+
+
+class TelegramCallbackResult(BaseModel):
+    identifier: str
+    confirmed: StrictBool
+    receipt: Optional[dict] = None
+
+
+class TelegramReceiptApproval(BaseModel):
+    receipt_id: str
+    recognized: StrictBool
+    rights_confirmed: StrictBool
+
+
+class TelegramDownloadResult(BaseModel):
+    identifier: str
+    saved: StrictBool
+    validated: StrictBool = False
+    published: StrictBool = False
+
+
+class TelegramDownloadProgress(BaseModel):
+    identifier: str
+    received: int
+    total: int
+
+
+class TelegramHeartbeat(BaseModel):
+    session_present: StrictBool
+    callback_enabled: StrictBool
+    download_enabled: StrictBool
+    publish_enabled: StrictBool
+    delete_enabled: StrictBool
+
+
+class TelegramDeleteRequest(BaseModel):
+    filename: str
+    confirmed: StrictBool
+    client_id: Optional[str] = None
+
+
+class TelegramDeleteResult(BaseModel):
+    identifier: str
+    deleted: StrictBool
+
+
+@app.post('/telegram/search')
+def telegram_search(req: TelegramSearchRequest, authorization: Optional[str] = Header(default=None)):
+    operator = require_telegram_operator(authorization)
+    try:
+        target = req.target.model_dump() if req.target is not None else None
+        return {'id': TELEGRAM_BRIDGE_QUEUE.submit(
+            operator=operator, query=req.query, identifier=req.client_id,
+            target=target, auto_select=req.auto_select)}
+    except BridgeQueueError:
+        raise HTTPException(status_code=409, detail='Búsqueda inválida o hay una solicitud pendiente') from None
+
+
+@app.get('/telegram/active-search')
+def telegram_active_search(authorization: Optional[str] = Header(default=None)):
+    operator = require_telegram_operator(authorization)
+    return {'job': TELEGRAM_BRIDGE_QUEUE.active(operator=operator)}
+
+
+@app.get('/telegram/search/{identifier}')
+def telegram_search_result(identifier: str, authorization: Optional[str] = Header(default=None)):
+    operator = require_telegram_operator(authorization)
+    try:
+        return TELEGRAM_BRIDGE_QUEUE.result(identifier=identifier, operator=operator)
+    except BridgeQueueError:
+        raise HTTPException(status_code=404, detail='Solicitud no encontrada') from None
+
+
+@app.delete('/telegram/search/{identifier}')
+def telegram_search_clear(identifier: str, authorization: Optional[str] = Header(default=None)):
+    operator = require_telegram_operator(authorization)
+    try:
+        TELEGRAM_BRIDGE_QUEUE.clear(identifier=identifier, operator=operator)
+    except BridgeQueueError:
+        raise HTTPException(status_code=409, detail='Solicitud no se puede cerrar') from None
+    return {'closed': True}
+
+
+@app.post('/telegram/search/{identifier}/select')
+def telegram_select(identifier: str, req: TelegramSelectionRequest,
+                    authorization: Optional[str] = Header(default=None)):
+    operator = require_telegram_operator(authorization)
+    try:
+        TELEGRAM_BRIDGE_QUEUE.select(identifier=identifier, operator=operator, result_id=req.result_id,
+                                    accepts_group_publication=req.accepts_group_publication,
+                                    accepts_uncertainty=req.accepts_uncertainty,
+                                    rights_confirmed=req.rights_confirmed, auto_download=req.auto_download)
+    except BridgeQueueError:
+        raise HTTPException(status_code=409, detail='Selección o confirmación inválida') from None
+    return {'selected': True, 'callback_sent': False}
+
+
+@app.post('/telegram/bridge/claim-selection')
+def telegram_bridge_claim_selection(x_telegram_bridge_key: Optional[str] = Header(default=None)):
+    require_telegram_bridge(x_telegram_bridge_key)
+    return {'selection': TELEGRAM_BRIDGE_QUEUE.claim_selection()}
+
+
+@app.post('/telegram/bridge/selection-check')
+def telegram_bridge_selection_check(req: TelegramSelectionCheck,
+                                    x_telegram_bridge_key: Optional[str] = Header(default=None)):
+    require_telegram_bridge(x_telegram_bridge_key)
+    try:
+        TELEGRAM_BRIDGE_QUEUE.finish_selection_check(identifier=req.identifier, verified=req.verified)
+    except BridgeQueueError:
+        raise HTTPException(status_code=409, detail='Selección no disponible') from None
+    return {'accepted': True, 'callback_sent': False}
+
+
+@app.post('/telegram/bridge/callback-result')
+def telegram_bridge_callback_result(req: TelegramCallbackResult,
+                                    x_telegram_bridge_key: Optional[str] = Header(default=None)):
+    require_telegram_bridge(x_telegram_bridge_key)
+    try:
+        TELEGRAM_BRIDGE_QUEUE.finish_callback(identifier=req.identifier, confirmed=req.confirmed, receipt=req.receipt)
+    except BridgeQueueError:
+        raise HTTPException(status_code=409, detail='Selección no disponible') from None
+    return {'accepted': True}
+
+
+@app.get('/telegram/search/{identifier}/receipt')
+def telegram_receipt(identifier: str, authorization: Optional[str] = Header(default=None)):
+    operator = require_telegram_operator(authorization)
+    try:
+        return {'receipt': TELEGRAM_BRIDGE_QUEUE.receipt(identifier=identifier, operator=operator)}
+    except BridgeQueueError:
+        raise HTTPException(status_code=404, detail='Solicitud no encontrada') from None
+
+
+@app.post('/telegram/search/{identifier}/approve-receipt')
+def telegram_approve_receipt(identifier: str, req: TelegramReceiptApproval,
+                             authorization: Optional[str] = Header(default=None)):
+    operator = require_telegram_operator(authorization)
+    try:
+        TELEGRAM_BRIDGE_QUEUE.approve_receipt(identifier=identifier, operator=operator,
+                                              receipt_id=req.receipt_id, recognized=req.recognized,
+                                              rights_confirmed=req.rights_confirmed)
+    except BridgeQueueError:
+        raise HTTPException(status_code=409, detail='Candidato o confirmación inválidos') from None
+    return {'approved': True, 'downloaded': False}
+
+
+@app.post('/telegram/bridge/claim-download')
+def telegram_bridge_claim_download(x_telegram_bridge_key: Optional[str] = Header(default=None)):
+    require_telegram_bridge(x_telegram_bridge_key)
+    return {'download': TELEGRAM_BRIDGE_QUEUE.claim_download()}
+
+
+def newest_imported_filename():
+    """Devuelve el MP3 importado más reciente, sin seguir enlaces simbólicos."""
+    directory = os.environ.get('MUSIC_TELEGRAM_IMPORTED_DIR', '')
+    if not directory:
+        return None
+    try:
+        candidates = []
+        for path in Path(directory).glob('telegram-*.mp3'):
+            try:
+                if (re.fullmatch(r'telegram-[0-9a-f]{32}\.mp3', path.name)
+                        and not path.is_symlink() and path.is_file()):
+                    candidates.append((path.stat().st_mtime_ns, path.name))
+            except OSError:
+                continue
+        return max(candidates)[1] if candidates else None
+    except OSError:
+        return None
+
+
+@app.post('/telegram/bridge/download-result')
+def telegram_bridge_download_result(req: TelegramDownloadResult,
+                                    x_telegram_bridge_key: Optional[str] = Header(default=None)):
+    require_telegram_bridge(x_telegram_bridge_key)
+    try:
+        filename = newest_imported_filename() if req.published else None
+        TELEGRAM_BRIDGE_QUEUE.finish_download(identifier=req.identifier, saved=req.saved,
+                                              validated=req.validated, published=req.published,
+                                              filename=filename)
+    except BridgeQueueError:
+        raise HTTPException(status_code=409, detail='Descarga no disponible') from None
+    return {'accepted': True}
+
+
+@app.post('/telegram/bridge/download-progress')
+def telegram_bridge_download_progress(req: TelegramDownloadProgress,
+                                      x_telegram_bridge_key: Optional[str] = Header(default=None)):
+    require_telegram_bridge(x_telegram_bridge_key)
+    try:
+        TELEGRAM_BRIDGE_QUEUE.download_progress(identifier=req.identifier, received=req.received, total=req.total)
+    except BridgeQueueError:
+        raise HTTPException(status_code=409, detail='Progreso inválido o descarga no disponible') from None
+    return {'accepted': True}
+
+
+@app.post('/telegram/library/delete')
+def telegram_delete(req: TelegramDeleteRequest, authorization: Optional[str] = Header(default=None)):
+    operator = require_telegram_operator(authorization)
+    try:
+        return {'id': TELEGRAM_DELETION_QUEUE.submit(operator=operator, filename=req.filename,
+                                                    confirmed=req.confirmed, identifier=req.client_id)}
+    except DeletionError:
+        raise HTTPException(status_code=409, detail='Eliminación inválida o pendiente') from None
+
+
+@app.get('/telegram/library/delete/{identifier}')
+def telegram_delete_status(identifier: str, authorization: Optional[str] = Header(default=None)):
+    operator = require_telegram_operator(authorization)
+    try:
+        return TELEGRAM_DELETION_QUEUE.status(identifier=identifier, operator=operator)
+    except DeletionError:
+        raise HTTPException(status_code=404, detail='Solicitud no encontrada') from None
+
+
+@app.delete('/telegram/library/delete/{identifier}')
+def telegram_delete_clear(identifier: str, authorization: Optional[str] = Header(default=None)):
+    operator = require_telegram_operator(authorization)
+    try:
+        TELEGRAM_DELETION_QUEUE.clear(identifier=identifier, operator=operator)
+    except DeletionError:
+        raise HTTPException(status_code=409, detail='Eliminación no se puede cerrar') from None
+    return {'closed': True}
+
+
+@app.post('/telegram/bridge/claim-delete')
+def telegram_bridge_claim_delete(x_telegram_bridge_key: Optional[str] = Header(default=None)):
+    require_telegram_bridge(x_telegram_bridge_key)
+    return {'delete': TELEGRAM_DELETION_QUEUE.claim()}
+
+
+@app.post('/telegram/bridge/delete-result')
+def telegram_bridge_delete_result(req: TelegramDeleteResult, x_telegram_bridge_key: Optional[str] = Header(default=None)):
+    require_telegram_bridge(x_telegram_bridge_key)
+    try:
+        TELEGRAM_DELETION_QUEUE.finish(identifier=req.identifier, deleted=req.deleted)
+    except DeletionError:
+        raise HTTPException(status_code=409, detail='Eliminación no disponible') from None
+    return {'accepted': True}
+
+
+@app.post('/telegram/bridge/claim')
+def telegram_bridge_claim(x_telegram_bridge_key: Optional[str] = Header(default=None)):
+    require_telegram_bridge(x_telegram_bridge_key)
+    return {'job': TELEGRAM_BRIDGE_QUEUE.claim()}
+
+
+@app.post('/telegram/bridge/heartbeat')
+def telegram_bridge_heartbeat(req: TelegramHeartbeat, x_telegram_bridge_key: Optional[str] = Header(default=None)):
+    require_telegram_bridge(x_telegram_bridge_key)
+    with TELEGRAM_BRIDGE_HEARTBEAT_LOCK:
+        TELEGRAM_BRIDGE_HEARTBEAT.update(at=time.monotonic(), ready=all((req.session_present,
+            req.callback_enabled, req.download_enabled, req.publish_enabled, req.delete_enabled)))
+    return {'accepted': True}
+
+
+@app.post('/telegram/bridge/finish')
+def telegram_bridge_finish(req: TelegramBridgeResult, x_telegram_bridge_key: Optional[str] = Header(default=None)):
+    require_telegram_bridge(x_telegram_bridge_key)
+    try:
+        TELEGRAM_BRIDGE_QUEUE.finish(identifier=req.identifier, results=req.results, failed=req.failed)
+    except BridgeQueueError:
+        raise HTTPException(status_code=409, detail='Respuesta inválida o solicitud no disponible') from None
+    return {'accepted': True}
 
 class RegisterRequest(BaseModel):
     username: str
@@ -533,24 +926,30 @@ def youtube_search(q: str = Query(..., min_length=2, max_length=200)):
 @app.get("/search_online")
 def search_online(
     q: str = Query(..., max_length=200, description="Nombre de la canción o artista"),
-    limit: int = Query(25, description="Número de resultados a extraer")
+    limit: int = Query(10, description="Número de resultados a extraer (máximo 50)")
 ):
     query = q.strip()
     if len(query) < 2:
         raise HTTPException(status_code=422, detail="Escribe al menos dos caracteres.")
-    if not pilot_enabled():
+    if not youtube_search_enabled():
         raise HTTPException(status_code=503, detail='Búsqueda de YouTube deshabilitada por seguridad.')
-    if not worker_ipc.valid_text(query, worker_ipc.MAX_QUERY) or type(limit) is not int or not 1 <= limit <= 25:
+    if not worker_ipc.valid_text(query, worker_ipc.MAX_QUERY) or type(limit) is not int or not 1 <= limit <= 50:
         raise HTTPException(status_code=422, detail='Consulta inválida')
     limit = min(limit, worker_ipc.MAX_RESULTS)
     if not SEARCH_SLOTS.acquire(blocking=False):
         raise HTTPException(status_code=503, detail='El servidor está ocupado. Inténtalo de nuevo.', headers={'Retry-After': '5'})
     try:
-        data = worker_ipc.search(query, limit, path=os.environ.get('MUSIC_WORKER_SOCKET', worker_ipc.SOCKET))
-        if data.get('status') != 'ok':
-            raise ValueError('worker unavailable')
+        try:
+            data = worker_ipc.search(query, limit, path=os.environ.get('MUSIC_WORKER_SOCKET', worker_ipc.SOCKET))
+            if data.get('status') != 'ok':
+                raise ValueError('worker unavailable')
+            items = data['results']
+        except Exception:
+            # El piloto puede ejecutarse sin el worker aislado. El respaldo
+            # solo busca metadatos; no descarga audio de YouTube.
+            items = direct_youtube_search(query, limit)
         results = []
-        for item in data['results']:
+        for item in items:
             video_id = item['video_id']
             results.append({'id': 'yt-' + video_id, 'title': item['title'],
                 'artist': item['artist'], 'album': 'YouTube',
@@ -708,7 +1107,66 @@ def list_tracks():
                 "audioUrl": f"/stream/{urllib.parse.quote(file_path.name)}",
                 "sourceType": "fastapi"
             })
+    imported_dir = os.environ.get('MUSIC_TELEGRAM_IMPORTED_DIR', '')
+    if imported_dir:
+        directory = Path(imported_dir)
+        paths = []
+        for candidate in directory.glob('telegram-*.mp3'):
+            try:
+                paths.append((candidate.stat().st_mtime_ns, candidate))
+            except OSError:
+                continue
+        paths.sort(key=lambda item: item[0], reverse=True)
+        for _, file_path in paths:
+            if (not re.fullmatch(r'telegram-[0-9a-f]{32}\.mp3', file_path.name)
+                    or file_path.is_symlink() or not file_path.is_file()):
+                continue
+            metadata = {}
+            metadata_path = file_path.with_suffix('.json')
+            try:
+                if not metadata_path.is_symlink():
+                    with metadata_path.open('rb') as source:
+                        raw = source.read(4097)
+                    if len(raw) <= 4096:
+                        parsed = json.loads(raw)
+                        if isinstance(parsed, dict):
+                            metadata = {key: value for key, value in parsed.items()
+                                        if key in ('title', 'artist', 'album', 'genre')
+                                        and isinstance(value, str) and 0 < len(value) <= 120
+                                        and all(c.isprintable() for c in value)}
+            except (OSError, ValueError, UnicodeError):
+                pass
+            cover = file_path.with_suffix('.jpg')
+            cover_url = (f'/telegram/cover/{cover.name}' if not cover.is_symlink() and cover.is_file() else None)
+            tracks.append({
+                'id': 'telegram-' + file_path.stem.removeprefix('telegram-'),
+                'filename': file_path.name,
+                'title': metadata.get('title', 'Importación Telegram · ' + file_path.stem[-8:]),
+                'artist': metadata.get('artist', 'Biblioteca personal'),
+                'album': metadata.get('album', 'Importaciones Telegram'),
+                'genre': metadata.get('genre', 'Sin género'), 'cover_url': cover_url,
+                'duration': 200, 'bpm': 120, 'keySignature': 'C Major',
+                'audioUrl': f'/stream/{urllib.parse.quote(file_path.name)}', 'sourceType': 'fastapi',
+            })
     return tracks
+
+
+@app.get('/telegram/cover/{filename}')
+def telegram_cover(filename: str):
+    directory = os.environ.get('MUSIC_TELEGRAM_IMPORTED_DIR', '')
+    if not directory or not re.fullmatch(r'telegram-[0-9a-f]{32}\.jpg', filename):
+        raise HTTPException(status_code=404, detail='Carátula no encontrada')
+    path = Path(directory) / filename
+    try:
+        if path.is_symlink():
+            raise ValueError
+        with path.open('rb') as source:
+            data = source.read(2 * 1024 * 1024 + 1)
+        if not data.startswith(b'\xff\xd8\xff') or len(data) > 2 * 1024 * 1024:
+            raise ValueError
+    except (OSError, ValueError):
+        raise HTTPException(status_code=404, detail='Carátula no encontrada') from None
+    return Response(data, media_type='image/jpeg', headers={'X-Content-Type-Options': 'nosniff'})
 
 def send_partial_file(request: Request, path: Path):
     file_size = path.stat().st_size
@@ -768,6 +1226,11 @@ def stream_radio_proxy(url: str):
 @app.get("/stream/{filename}")
 def stream_audio(filename: str, request: Request):
     file_path = MUSIC_DIR / filename
+    if (not file_path.exists() and re.fullmatch(r'telegram-[0-9a-f]{32}\.mp3', filename)
+            and os.environ.get('MUSIC_TELEGRAM_IMPORTED_DIR')):
+        candidate = Path(os.environ['MUSIC_TELEGRAM_IMPORTED_DIR']) / filename
+        if not candidate.is_symlink():
+            file_path = candidate
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="Archivo de audio no encontrado")
     return send_partial_file(request, file_path)

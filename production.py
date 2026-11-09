@@ -55,7 +55,7 @@ class PublicSafety:
 
         if path == '/api/auth/register' and not enabled('MUSIC_ALLOW_REGISTRATION'):
             return await reject(403, 'El registro público está desactivado. Contacta al administrador.')
-        if (path == '/api/tracks' or path.startswith('/api/stream/')) and not enabled('MUSIC_ENABLE_LOCAL_LIBRARY'):
+        if (path == '/api/tracks' or path.startswith('/api/stream/') or path.startswith('/api/telegram/cover/')) and not enabled('MUSIC_ENABLE_LOCAL_LIBRARY'):
             return await reject(403, 'La biblioteca local no está publicada.')
         if path in ('/api/docs', '/api/redoc', '/api/openapi.json'):
             return await reject(404, 'No encontrado')

@@ -1,0 +1,38 @@
+name: diaz-music
+
+services:
+  music:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: diaz-music:latest
+    container_name: diaz-music
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:8589:8589"
+    env_file:
+      - ./app.env
+    environment:
+      MUSIC_DB_PATH: /data/diaz_music_users.db
+      MUSIC_DIR: /data/music
+      MUSIC_TELEGRAM_IMPORTED_DIR: /telegram-imported
+    volumes:
+      - ../../data:/data
+      - ../../music/telegram-ready:/telegram-imported:ro
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 20s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8589/api/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

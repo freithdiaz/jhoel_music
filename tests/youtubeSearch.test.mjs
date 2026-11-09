@@ -7,13 +7,25 @@ const { searchYouTube, searchYouTubeStream } = await import(`data:text/javascrip
 
 test('búsqueda de streaming solo acepta rutas locales e IDs válidos', async () => {
   globalThis.fetch = async url => {
-    assert.match(String(url), /\/search_online\?q=music/);
+    assert.match(String(url), /\/search_online\?q=music&limit=10/);
     return new Response(JSON.stringify([
       { id: 'yt-abcdefghijk', sourceType: 'invidious', title: 'Song', artist: 'Artist', audioUrl: '/stream_yt?v=abcdefghijk' },
       { id: 'yt-abcdefghijk', sourceType: 'invidious', title: 'Bad', artist: 'Artist', audioUrl: 'https://evil.test/' },
     ]));
   };
   assert.equal((await searchYouTubeStream('/api', 'music', new AbortController().signal)).length, 1);
+});
+
+test('permite pedir 50 resultados y limita otras cantidades a 10', async () => {
+  const urls = [];
+  globalThis.fetch = async url => {
+    urls.push(String(url));
+    return new Response(JSON.stringify([]));
+  };
+  await searchYouTubeStream('/api', 'music', new AbortController().signal, 50);
+  await searchYouTubeStream('/api', 'music', new AbortController().signal, 25);
+  assert.match(urls[0], /limit=50/);
+  assert.match(urls[1], /limit=10/);
 });
 
 test('consulta el buscador oficial del servidor y filtra resultados inválidos', async () => {

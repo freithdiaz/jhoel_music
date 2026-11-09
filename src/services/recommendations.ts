@@ -13,7 +13,7 @@ const artistGroups = [
 const genreGroups: [string, string[]][] = [
   ['reggaeton', ['reggaeton', 'regueton', 'urbano latino', 'latin urban']],
   ['merengue', ['merengue', 'mambo']],
-  ['salsa', ['salsa']], ['vallenato', ['vallenato']],
+  ['salsa', ['salsa']], ['bachata', ['bachata']], ['vallenato', ['vallenato']],
   ['tropical', ['tropical', 'cumbia', 'champeta']],
   ['pop', ['pop', 'singer songwriter', 'acoustic']],
   ['electronic', ['electronic', 'edm', 'house', 'techno']],
@@ -33,7 +33,7 @@ export function trackGenre(track: Track): string {
   if (group === artistGroups[1]) return 'pop';
   if (group === artistGroups[2]) return 'merengue';
   const raw = normalize(track.genre).trim();
-  return ['musica universal', 'musica online', 'unknown', ''].includes(raw) ? '' : raw;
+  return ['musica universal', 'musica online', 'unknown', 'sin genero', ''].includes(raw) ? '' : raw;
 }
 
 export function relatedReason(current: Track, candidate: Track): string {

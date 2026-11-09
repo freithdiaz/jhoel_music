@@ -1,5 +1,11 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { TelegramStatus } from './TelegramStatus';
+import { TelegramBackgroundImport } from './TelegramBackgroundImport';
+import type { BackgroundImportResult } from './TelegramBackgroundImport';
+import { Imported } from './TelegramImported';
 import { searchYouTubeStream } from './services/youtubeSearch';
+import { buildTelegramImport } from './services/telegramImport';
+import type { TelegramImportTarget } from './services/telegramImport';
 import {
   Play, Pause, SkipForward, SkipBack, Volume2, VolumeX, Repeat, Shuffle,
   Heart, Download, CheckCircle2, Sliders, Radio, Disc, Music, Upload,
@@ -28,18 +34,20 @@ import {
 } from './services/authService';
 import {
   updateMediaSessionMetadata,
+  updateMediaSessionPlaybackState,
   updateMediaSessionPosition,
   registerMediaSessionHandlers,
   enableScreenWakeLock,
   releaseScreenWakeLock
 } from './services/mediaSession';
+import { createPlaybackIntent } from './services/playbackIntent';
 import {
   saveTrackOffline,
   removeTrackOffline,
   getAllOfflineTracks,
   exportDrmFreeFile
 } from './services/offlineVault';
-import { fetchTrendingFreeTracks, searchFreeMusicOnline, fetchSearchSuggestions } from './services/freeMusicApi';
+import { searchFreeMusicOnline, fetchSearchSuggestions } from './services/freeMusicApi';
 import { rankRelated, recommendationQuery, relatedReason, trackGenre } from './services/recommendations';
 import { playbackUrl } from './services/playbackUrl';
 import { playbackFailureMessage, trackSourceLabel } from './services/musicSources';
@@ -317,6 +325,7 @@ export default function App() {
   const homeOrderRef = useRef<{ scope: string; ids: string[]; tracks: Map<string, Track> }>({ scope: '', ids: [], tracks: new Map() });
   const [currentTrackIndex, setCurrentTrackIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const playbackIntentRef = useRef(createPlaybackIntent());
   const [isBuffering, setIsBuffering] = useState(false);
   const [unavailableTrackIds, setUnavailableTrackIds] = useState<Set<string>>(() => new Set());
   const playbackTrackRef = useRef<Track | null>(null);
@@ -366,6 +375,9 @@ export default function App() {
   const [isSuggestionsOpen, setIsSuggestionsOpen] = useState(false);
   const [searchCurrentPage, setSearchCurrentPage] = useState(1);
   const SEARCH_PAGE_SIZE = 10;
+  const [searchResultLimit, setSearchResultLimit] = useState<10 | 50>(() => {
+    try { return Number(localStorage.getItem('diaz-search-limit')) === 50 ? 50 : 10; } catch { return 10; }
+  });
   const searchDebounceRef = useRef<any>(null);
 
   // Paginación limpia para Inicio & Tendencias (Máximo 10 por vista con botones siguiente/anterior)
@@ -377,6 +389,7 @@ export default function App() {
     new URL(import.meta.env.VITE_API_BASE_URL || '/api', window.location.origin).href.replace(/\/$/, '')
   );
   const [serverStatus, setServerStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
+  const [telegramImportCount, setTelegramImportCount] = useState(0);
 
   // ==========================================
   // AUTENTICACIÓN & SESIÓN MULTIUSUARIO (USUARIO Y CONTRASEÑA)
@@ -395,6 +408,32 @@ export default function App() {
   const [conflictOpen, setConflictOpen] = useState(false);
   const [conflictPreview, setConflictPreview] = useState<ConflictPreview | null>(null);
   const [conflictError, setConflictError] = useState('');
+
+  // Objetivo de importación YouTube→Telegram; se conserva por usuario y servidor
+  // para reanudar la tarjeta de progreso si se recarga la página.
+  const telegramTargetKey = `diaz-telegram-target:${currentUser?.username || 'guest'}:${fastApiUrl}`;
+  const [telegramImportTarget, setTelegramImportTarget] = useState<TelegramImportTarget | null>(() => {
+    try {
+      const raw = sessionStorage.getItem(telegramTargetKey);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return parsed && typeof parsed.nonce === 'number' && typeof parsed.query === 'string' && typeof parsed.title === 'string' ? parsed : null;
+    } catch { return null; }
+  });
+
+  useEffect(() => {
+    try {
+      if (telegramImportTarget) sessionStorage.setItem(telegramTargetKey, JSON.stringify(telegramImportTarget));
+      else sessionStorage.removeItem(telegramTargetKey);
+    } catch {}
+  }, [telegramImportTarget, telegramTargetKey]);
+
+  const telegramTargetUser = useRef(currentUser?.username || 'guest');
+  useEffect(() => {
+    const user = currentUser?.username || 'guest';
+    if (telegramTargetUser.current === user) return;
+    telegramTargetUser.current = user;
+    setTelegramImportTarget(null);
+  }, [currentUser?.username]);
 
   // Inicializar datos del usuario actual (o invitado)
   const initialUserData = useMemo(() => {
@@ -428,6 +467,11 @@ export default function App() {
   const [musicSelection, setMusicSelection] = useState(0);
   const [relatedTracks, setRelatedTracks] = useState<Track[]>([]);
   const [regionalTracks, setRegionalTracks] = useState<Track[]>([]);
+  const [prefetchedAutoDjTrack, setPrefetchedAutoDjTrack] = useState<Track | null>(null);
+  const [backgroundImportTarget, setBackgroundImportTarget] = useState<TelegramImportTarget | null>(null);
+  const [backgroundImportBusy, setBackgroundImportBusy] = useState(false);
+  const waitingForPrefetchRef = useRef(false);
+  const prefetchAttemptedRef = useRef<Set<string>>(new Set());
   const [regionalLoading, setRegionalLoading] = useState(true);
   const [personalTracks, setPersonalTracks] = useState<Track[]>([]);
   const [musicRegion, setMusicRegion] = useState(() => localStorage.getItem('thomas_music_region') || 'CO');
@@ -691,6 +735,7 @@ export default function App() {
 
   // Sintonizar emisora de radio con 0 cortes (Sin mezclar con la lista de canciones)
   const playRadioStation = (station: Track) => {
+    const ticket = playbackIntentRef.current.play('radio');
     updatePlaybackQueue(null);
     nextRequestRef.current++;
     setIsBuffering(false);
@@ -717,14 +762,13 @@ export default function App() {
       radioAudioRef.current.src = station.audioUrl;
       radioAudioRef.current.volume = isMuted ? 0 : Math.min(1, Math.max(0, volume));
       radioAudioRef.current.load();
-      radioAudioRef.current.play().catch((err) => {
-        console.warn('Reintentando conexión con emisora:', err);
-        setTimeout(() => {
-          if (radioAudioRef.current) {
-            radioAudioRef.current.load();
-            radioAudioRef.current.play().catch(console.warn);
-          }
-        }, 150);
+      radioAudioRef.current.play().then(() => {
+        if (playbackIntentRef.current.isCurrent(ticket, 'radio')) setIsPlaying(true);
+      }).catch(() => {
+        if (!playbackIntentRef.current.isCurrent(ticket, 'radio')) return;
+        playbackIntentRef.current.pause();
+        setIsPlaying(false);
+        showToast('No se pudo reproducir la emisora. Comprueba la conexión o prueba otra.');
       });
     }
 
@@ -786,10 +830,8 @@ export default function App() {
     let cancelled = false;
     setRelatedTracks([]);
     const query = recommendationQuery(currentMusicTrack, recentTracksRef.current.slice(-5).map(t => t.artist));
-    const genre = trackGenre(currentMusicTrack);
-    const request = { trackId: currentMusicTrack.id, promise: searchFreeMusicOnline(query, fastApiUrl).then(results =>
-      query === `${genre} musica` ? results.map(track => trackGenre(track) ? track : { ...track, genre }) : results
-    ).catch(() => [] as Track[]) };
+    const request = { trackId: currentMusicTrack.id,
+      promise: searchYouTubeStream(fastApiUrl, query, AbortSignal.timeout(20000)).catch(() => [] as Track[]) };
     relatedRequestRef.current = request;
     request.promise.then(results => {
       if (!cancelled) setRelatedTracks(results);
@@ -799,23 +841,24 @@ export default function App() {
 
   useEffect(() => {
     const colombia = musicRegion === 'CO' || (musicRegion === 'auto' && (navigator.languages?.some(lang => /-CO\b/i.test(lang)) || /-CO\b/i.test(navigator.language)));
-    const hasRealHistory = favorites50List.some(track => !INITIAL_TRACKS.some(demo => demo.id === track.id && track.sourceType === 'curated'));
-    if (!colombia || hasRealHistory || !isOnline) { setRegionalTracks([]); setRegionalLoading(false); return; }
+    if (!isOnline) { setRegionalTracks([]); setRegionalLoading(false); return; }
     let cancelled = false;
     setRegionalLoading(true);
-    searchFreeMusicOnline('reggaeton', fastApiUrl).then(results => {
+    const query = colombia ? 'éxitos Colombia 2026' : 'éxitos globales 2026';
+    searchYouTubeStream(fastApiUrl, query, AbortSignal.timeout(20000)).then(results => {
       if (!cancelled) setRegionalTracks(results);
-    }).finally(() => { if (!cancelled) setRegionalLoading(false); });
+    }).catch(() => { if (!cancelled) setRegionalTracks([]); })
+      .finally(() => { if (!cancelled) setRegionalLoading(false); });
     return () => { cancelled = true; };
-  }, [fastApiUrl, favorites50List, musicRegion, isOnline]);
+  }, [fastApiUrl, musicRegion, isOnline]);
 
   useEffect(() => {
     const seed = favorites50List.find(track => !INITIAL_TRACKS.some(demo => demo.id === track.id && track.sourceType === 'curated'));
     if (!seed || !isOnline) { setPersonalTracks([]); return; }
     let cancelled = false;
-    searchFreeMusicOnline(recommendationQuery(seed), fastApiUrl).then(results => {
+    searchYouTubeStream(fastApiUrl, recommendationQuery(seed), AbortSignal.timeout(20000)).then(results => {
       if (!cancelled) setPersonalTracks(results);
-    });
+    }).catch(() => { if (!cancelled) setPersonalTracks([]); });
     return () => { cancelled = true; };
   }, [fastApiUrl, favorites50List, isOnline]);
 
@@ -1018,12 +1061,6 @@ export default function App() {
       if (active) { setVaultReady(true); showToast('No se pudo abrir la bóveda offline en este dispositivo.'); }
     });
 
-    // Cargar tendencias gratuitas de Audius en segundo plano
-    fetchTrendingFreeTracks().then((trending) => {
-      if (trending.length > 0) {
-        setTracks((prev) => [...prev, ...trending]);
-      }
-    }).catch(console.warn);
     return () => { active = false; };
   }, []);
 
@@ -1267,7 +1304,7 @@ export default function App() {
         if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
           audioCtxRef.current.resume().catch(console.warn);
         }
-        if (isPlaying) {
+        if (isPlaying && playbackIntentRef.current.wants(activeAudioSource)) {
           if (activeAudioSource === 'radio') {
             if (radioAudioRef.current && (radioAudioRef.current.paused || radioAudioRef.current.readyState < 2 || radioAudioRef.current.error)) {
               console.log('Reanudando señal de radio al cambiar o volver de pestaña...');
@@ -1292,6 +1329,73 @@ export default function App() {
     };
   }, [isPlaying, activeAudioSource, currentRadioStation]);
 
+  const pausePlayback = () => {
+    if (activeAudioSource === 'music' && currentMusicTrack.sourceType === 'youtube') {
+      showToast('Usa los controles del reproductor de YouTube.');
+      return;
+    }
+    nextRequestRef.current++;
+    playbackIntentRef.current.pause();
+    if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+    if (activeAudioSource === 'radio') radioAudioRef.current?.pause();
+    else audioRef.current?.pause();
+    setIsPlaying(false);
+    setIsBuffering(false);
+  };
+
+  const resumePlayback = () => {
+    const source = activeAudioSource;
+    if (source === 'music' && !hasSelectedMusicRef.current) {
+      showToast('Elige una canción para comenzar');
+      return;
+    }
+    if (source === 'music' && currentMusicTrack.sourceType === 'youtube') {
+      showToast('Usa los controles del reproductor de YouTube.');
+      return;
+    }
+    nextRequestRef.current++;
+    const ticket = playbackIntentRef.current.play(source);
+    if (source === 'music' && useSynthFallback) {
+      setIsPlaying(true);
+      return;
+    }
+    const audio = source === 'radio' ? radioAudioRef.current : audioRef.current;
+    if (!audio) {
+      playbackIntentRef.current.pause();
+      setIsPlaying(false);
+      return;
+    }
+    if (source === 'radio') {
+      // Una radio en vivo se reconecta al punto actual, no a un búfer detenido.
+      audio.src = currentRadioStation.audioUrl;
+      audio.load();
+    } else {
+      initWebAudio();
+      if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume().catch(console.warn);
+      if (!audio.getAttribute('src')) {
+        const url = playbackUrl(currentMusicTrack, fastApiUrl, window.location.href);
+        if (!url) {
+          playbackIntentRef.current.pause();
+          setIsPlaying(false);
+          showToast('Esta canción no tiene un enlace de audio disponible.');
+          return;
+        }
+        audio.src = url;
+      }
+      setIsBuffering(true);
+    }
+    audio.play().then(() => {
+      if (playbackIntentRef.current.isCurrent(ticket, source)) setIsPlaying(true);
+      else if (!playbackIntentRef.current.wants(source)) audio.pause();
+    }).catch(() => {
+      if (!playbackIntentRef.current.isCurrent(ticket, source)) return;
+      playbackIntentRef.current.pause();
+      setIsPlaying(false);
+      setIsBuffering(false);
+      showToast(source === 'radio' ? 'No se pudo reanudar la emisora. Prueba de nuevo.' : 'No se pudo reanudar esta canción.');
+    });
+  };
+
   // ==========================================
   // MEDIA SESSION & AUDÍFONOS / INTERCOMUNICADOR
   // ==========================================
@@ -1301,42 +1405,12 @@ export default function App() {
     }
   }, [currentTrack, musicSelection, activeAudioSource]);
 
+  useEffect(() => { updateMediaSessionPlaybackState(isPlaying); }, [isPlaying]);
+
   useEffect(() => {
     registerMediaSessionHandlers({
-      onPlay: () => {
-        if (activeAudioSource === 'music' && currentMusicTrack.sourceType === 'youtube') { showToast('Usa los controles del reproductor de YouTube.'); return; }
-        if (activeAudioSource === 'radio') {
-          if (radioAudioRef.current) {
-            radioAudioRef.current.play().then(() => setIsPlaying(true)).catch(console.warn);
-          }
-        } else {
-          if (audioRef.current) {
-            initWebAudio();
-            if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-              audioCtxRef.current.resume();
-            }
-            audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {
-              setUseSynthFallback(true);
-              setIsPlaying(true);
-            });
-          }
-        }
-      },
-      onPause: () => {
-        if (activeAudioSource === 'music' && currentMusicTrack.sourceType === 'youtube') { showToast('Usa los controles del reproductor de YouTube.'); return; }
-        nextRequestRef.current++;
-        if (activeAudioSource === 'radio') {
-          if (radioAudioRef.current) {
-            radioAudioRef.current.pause();
-            setIsPlaying(false);
-          }
-        } else {
-          if (audioRef.current) {
-            audioRef.current.pause();
-            setIsPlaying(false);
-          }
-        }
-      },
+      onPlay: resumePlayback,
+      onPause: pausePlayback,
       onNext: () => handleNextTrack(),
       onPrev: () => handlePrevTrack(),
       onSeek: (targetTime) => {
@@ -1356,7 +1430,7 @@ export default function App() {
         }
       }
     });
-  }, [currentTrackIndex, tracks, duration, playbackSpeed, activeAudioSource, currentMusicTrack.sourceType, autoRadioEnabled, relatedTracks, personalTracks, onlineSearchResults, favorites50List, userTasteProfile, radioStations, currentRadioStation, unavailableTrackIds, offlineTracks]);
+  }, [currentTrackIndex, tracks, duration, playbackSpeed, activeAudioSource, currentMusicTrack.sourceType, autoRadioEnabled, relatedTracks, personalTracks, onlineSearchResults, favorites50List, userTasteProfile, radioStations, currentRadioStation, unavailableTrackIds, offlineTracks, useSynthFallback, musicSelection]);
 
   const toggleWakeLock = async () => {
     if (isWakeLockActive) {
@@ -1505,62 +1579,8 @@ export default function App() {
   // CONTROL DE REPRODUCCIÓN & LOOP A-B
   // ==========================================
   const togglePlay = () => {
-    nextRequestRef.current++;
-    if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
-    if (activeAudioSource === 'radio') {
-      if (!radioAudioRef.current) return;
-      if (isPlaying) {
-        radioAudioRef.current.pause();
-        setIsPlaying(false);
-      } else {
-        if (!radioAudioRef.current.src || radioAudioRef.current.src === '' || radioAudioRef.current.ended) {
-          radioAudioRef.current.src = currentRadioStation.audioUrl;
-          radioAudioRef.current.load();
-        }
-        radioAudioRef.current.play().then(() => {
-          setIsPlaying(true);
-        }).catch((err) => {
-          console.warn('Reintentando radio play:', err);
-          radioAudioRef.current?.load();
-          radioAudioRef.current?.play().then(() => setIsPlaying(true)).catch(console.warn);
-        });
-      }
-      return;
-    }
-
-    if (!hasSelectedMusicRef.current) { showToast('Elige una canción para comenzar'); return; }
-    if (currentMusicTrack.sourceType === 'youtube') { showToast('Usa los controles del reproductor de YouTube.'); return; }
-    initWebAudio();
-    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-      audioCtxRef.current.resume();
-    }
-
-    if (useSynthFallback) {
-      setIsPlaying(!isPlaying);
-      return;
-    }
-
-    if (!audioRef.current) return;
-    if (isPlaying) {
-      audioRef.current.pause();
-      setIsPlaying(false);
-      setIsBuffering(false);
-    } else {
-      setIsBuffering(true);
-      if (!audioRef.current.getAttribute('src')) {
-        audioRef.current.src = currentMusicTrack.audioUrl;
-      }
-      audioRef.current.play().then(() => {
-        setIsPlaying(true);
-      }).catch((err) => {
-        console.warn('Reintentando play:', err);
-        audioRef.current?.load();
-        audioRef.current?.play().then(() => setIsPlaying(true)).catch((retryError) => {
-          setIsBuffering(false);
-          console.warn(retryError);
-        });
-      });
-    }
+    if (playbackIntentRef.current.wants(activeAudioSource)) pausePlayback();
+    else resumePlayback();
   };
 
   const playSong = (track: Track, rememberPrevious = true, preserveQueue = false) => {
@@ -1574,9 +1594,7 @@ export default function App() {
     }
     const offlineCopy = track.sourceType === 'youtube' ? undefined : offlineTracksRef.current.find(item => item.id === track.id);
     if (!navigator.onLine && !offlineCopy) {
-      audioRef.current?.pause();
-      setIsPlaying(false);
-      setIsBuffering(false);
+      pausePlayback();
       showToast('Esta canción no está descargada en este dispositivo.');
       return;
     }
@@ -1585,8 +1603,7 @@ export default function App() {
       : offlineCopy || track;
     const resolvedUrl = playbackUrl(sourceTrack, fastApiUrl, window.location.href);
     if (!resolvedUrl) {
-      setIsPlaying(false);
-      setIsBuffering(false);
+      pausePlayback();
       showToast('Esta canción no tiene un enlace de audio disponible. Búscala de nuevo.');
       return;
     }
@@ -1599,6 +1616,7 @@ export default function App() {
     setMusicSelection(value => value + 1);
     listeningRef.current = { trackId: track.id, lastTime: 0, lastWall: 0, listened: 0, counted: false };
     setUseSynthFallback(false);
+    playbackIntentRef.current.play('music');
     setActiveAudioSource('music');
     setIsPlaying(true);
     setIsBuffering(true);
@@ -1630,6 +1648,7 @@ export default function App() {
       audioRef.current.load();
       playbackTimeoutRef.current = setTimeout(() => {
         if (nextRequestRef.current !== playbackRequest || !audioRef.current || audioRef.current.readyState >= 3) return;
+        playbackIntentRef.current.pause();
         audioRef.current.pause();
         setIsPlaying(false);
         setIsBuffering(false);
@@ -1647,6 +1666,7 @@ export default function App() {
         if (nextRequestRef.current !== playbackRequest || err?.name === 'AbortError') return;
         if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
         console.warn('No se pudo reproducir la pista:', err);
+        playbackIntentRef.current.pause();
         setIsPlaying(false);
         setIsBuffering(false);
         setUnavailableTrackIds(previous => new Set(previous).add(track.id));
@@ -1729,6 +1749,7 @@ export default function App() {
       updatePlaybackQueue(null);
       if (!autoRadioEnabled) {
         audioRef.current?.pause();
+        playbackIntentRef.current.pause();
         setIsPlaying(false);
         setIsBuffering(false);
         showToast(`Terminó la playlist: ${queue.name}`);
@@ -1736,20 +1757,53 @@ export default function App() {
       }
     }
 
+    if (prefetchedAutoDjTrack) {
+      const track = prefetchedAutoDjTrack;
+      setPrefetchedAutoDjTrack(null);
+      setTracks(previous => [track, ...previous.filter(item => item.id !== track.id)]);
+      playSong(track);
+      return;
+    }
+
+    if (backgroundImportBusy) {
+      waitingForPrefetchRef.current = true;
+      audioRef.current?.pause();
+      playbackIntentRef.current.pause();
+      setIsPlaying(false);
+      setIsBuffering(true);
+      showToast('Preparando la siguiente canción desde Telegram…');
+      return;
+    }
+
     if (autoRadioEnabled) {
-      let candidates = rankRelated([...relatedTracks, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List].filter(t => !unavailableTrackIds.has(t.id) || isDownloaded(t.id)), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id));
+      let candidates = rankRelated([...relatedTracks, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List].filter(t => !['jamendo', 'audius', 'itunes'].includes(t.sourceType) && !INITIAL_TRACKS.some(demo => demo.id === t.id && t.sourceType === 'curated') && (!unavailableTrackIds.has(t.id) || isDownloaded(t.id))), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id));
       const request = relatedRequestRef.current;
       if (!candidates.length && request?.trackId === currentMusicTrack.id) {
         showToast('Buscando canciones relacionadas…');
         const results = await request.promise;
         if (requestId !== nextRequestRef.current) return;
-        candidates = rankRelated([...results, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List].filter(t => !unavailableTrackIds.has(t.id) || isDownloaded(t.id)), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id));
+        candidates = rankRelated([...results, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List].filter(t => !['jamendo', 'audius', 'itunes'].includes(t.sourceType) && !INITIAL_TRACKS.some(demo => demo.id === t.id && t.sourceType === 'curated') && (!unavailableTrackIds.has(t.id) || isDownloaded(t.id))), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id));
       }
       if (candidates[0]) {
+        if (isYouTubeResult(candidates[0])) {
+          const target = buildTelegramImport(candidates[0], Date.now());
+          if (target) {
+            waitingForPrefetchRef.current = true;
+            audioRef.current?.pause();
+            playbackIntentRef.current.pause();
+            setIsPlaying(false);
+            setBackgroundImportBusy(true);
+            setBackgroundImportTarget(target);
+            setIsBuffering(true);
+            showToast(`Descargando «${target.title}» para la siguiente…`);
+            return;
+          }
+        }
         playSong(candidates[0]);
         return;
       }
       audioRef.current?.pause();
+      playbackIntentRef.current.pause();
       setIsPlaying(false);
       showToast('No encontramos otra canción relacionada. Busca más música o desactiva Auto-DJ para seguir la lista.');
       return;
@@ -1868,7 +1922,28 @@ export default function App() {
   // ==========================================
   // BÚSQUEDA ONLINE EN VIVO (UNIVERSAL + AUDIUS + SERVIDOR)
   // ==========================================
-  const executeOnlineSearch = async (query: string) => {
+  const isYouTubeResult = (track: Track) =>
+    track.sourceType === 'invidious' || (track.sourceType === 'youtube' && /^yt-[A-Za-z0-9_-]{11}$/.test(track.id));
+
+  const requestTelegramImport = (track: Track) => {
+    if (backgroundImportBusy) {
+      showToast('Se está preparando la siguiente canción. Inténtalo de nuevo en unos segundos.');
+      return;
+    }
+    const target = buildTelegramImport(track, Date.now());
+    if (!target) {
+      showToast('Esta canción no se puede importar automáticamente desde Telegram. Prueba otra.');
+      return;
+    }
+    setTelegramImportTarget(target);
+    setActiveTab('search');
+    showToast(`Buscando «${target.title}» en Telegram…`);
+    window.setTimeout(() => {
+      document.getElementById('telegram-import')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }, 150);
+  };
+
+  const executeOnlineSearch = async (query: string, limit = searchResultLimit) => {
     if (!query || query.trim().length < 2) return;
     setActiveTab('search');
     setIsSearchingOnline(true);
@@ -1877,7 +1952,7 @@ export default function App() {
     try {
       let results: Track[];
       if (searchProvider === 'stream') {
-        results = await searchYouTubeStream(fastApiUrl, query, AbortSignal.timeout(20000));
+        results = await searchYouTubeStream(fastApiUrl, query, AbortSignal.timeout(20000), limit);
       } else {
         results = await searchFreeMusicOnline(query, fastApiUrl);
       }
@@ -1920,7 +1995,7 @@ export default function App() {
   };
 
   // Conexión con Servidor FastAPI Local
-  const connectFastApiServer = async () => {
+  const connectFastApiServer = async (announce = true): Promise<Track[] | null> => {
     setServerStatus('connecting');
     try {
       const controller = new AbortController();
@@ -1928,14 +2003,20 @@ export default function App() {
       const res = await fetch(`${fastApiUrl}/tracks`, { signal: controller.signal });
       clearTimeout(timeoutId);
 
-      if (res.ok) {
+      if (!res.ok) throw new Error('Biblioteca no disponible');
+      let importedTracks: Track[] = [];
+      {
         const data = await res.json();
+        if (Array.isArray(data)) {
+          setTelegramImportCount(data.filter(item => item && typeof item.filename === 'string'
+            && /^telegram-[0-9a-f]{32}\.mp3$/.test(item.filename)).length);
+        }
         if (Array.isArray(data) && data.length > 0) {
           const imported = data.map((item: any, idx: number): Track => ({
             id: `fastapi-${item.id || idx}`,
             title: item.title || item.filename,
             artist: item.artist || 'Servidor FastAPI',
-            album: 'HomeLab NAS /musica',
+            album: item.album || 'HomeLab NAS /musica',
             duration: item.duration || 195,
             bpm: item.bpm || 122,
             keySignature: item.keySignature || 'A Minor',
@@ -1943,45 +2024,117 @@ export default function App() {
             acousticness: 25,
             danceability: 85,
             genre: item.genre || 'Self-Hosted',
-            coverUrl: item.cover_url || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80',
+            coverUrl: typeof item.cover_url === 'string' && /^\/telegram\/cover\/telegram-[0-9a-f]{32}\.jpg$/.test(item.cover_url)
+              ? `${fastApiUrl}${item.cover_url}` : item.cover_url || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80',
             audioUrl: `${fastApiUrl}/stream/${encodeURIComponent(item.filename)}`,
             sourceType: 'fastapi',
             cachedOffline: false,
             liked: false,
             lyrics: [{ time: 0, text: `♪ Streaming desde ${fastApiUrl} ♪` }]
           }));
-          setTracks((prev) => [...imported, ...prev]);
+          importedTracks = imported;
+          setTracks((prev) => [...imported, ...prev.filter(track => !imported.some(item => item.id === track.id))]);
         }
       }
       setServerStatus('connected');
-      showToast(`Sincronizado con el nodo FastAPI (${fastApiUrl})`);
+      if (announce) showToast(`Sincronizado con el nodo FastAPI (${fastApiUrl})`);
+      return importedTracks;
     } catch {
-      const demoServerTrack: Track = {
-        id: `fastapi-demo-${Date.now()}`,
-        title: 'HomeLab FLAC Hi-Res Stream #01',
-        artist: 'FastAPI Docker Server',
-        album: 'HomeLab NAS /musica',
-        duration: 180,
-        bpm: 124,
-        keySignature: 'E Minor',
-        energy: 86,
-        acousticness: 18,
-        danceability: 88,
-        genre: 'Self-Hosted FLAC',
-        coverUrl: 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80',
-        audioUrl: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
-        sourceType: 'fastapi',
-        cachedOffline: false,
-        liked: true,
-        lyrics: [
-          { time: 0, text: `♪ Streaming desde ${fastApiUrl} ♪` },
-          { time: 18, text: 'Transmitiendo FLAC sin compresión por red privada' }
-        ]
-      };
-      setTracks((prev) => [demoServerTrack, ...prev]);
-      setServerStatus('connected');
-      showToast('Nodo FastAPI vinculado a Thomas Music (Pista agregada)');
+      setServerStatus('disconnected');
+      if (announce) showToast('No se pudo consultar la biblioteca del servidor. Comprueba la conexión y su configuración.');
+      return null;
     }
+  };
+
+  useEffect(() => {
+    // Carga la biblioteca del servidor (incluidas importaciones) al iniciar.
+    void connectFastApiServer(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fastApiUrl]);
+
+  const onTelegramPublished = async (filename?: string) => {
+    const imported = await connectFastApiServer(false);
+    if (!imported) {
+      showToast('Importación completada; actualiza la Bóveda cuando recuperes la conexión.');
+      return;
+    }
+    const track = filename
+      ? imported.find(item => item.audioUrl.endsWith('/' + encodeURIComponent(filename)))
+      : undefined;
+    if (track) {
+      setTracks(previous => [track, ...previous.filter(item => item.id !== track.id)]);
+      playSong(track);
+      showToast(`Reproduciendo «${track.title}» importada desde Telegram.`);
+    } else {
+      showToast('Importación guardada en Bóveda Offline. Ábrela para añadirla a una playlist.');
+    }
+  };
+
+  const handleBackgroundImportFinished = async (result: BackgroundImportResult) => {
+    setBackgroundImportTarget(null);
+    setBackgroundImportBusy(false);
+    if (!result.ok || !result.filename) {
+      if (waitingForPrefetchRef.current) {
+        waitingForPrefetchRef.current = false;
+        setIsBuffering(false);
+        showToast('No se pudo preparar la siguiente canción desde Telegram. Elige otra opción.');
+      }
+      return;
+    }
+    const imported = await connectFastApiServer(false);
+    const track = imported?.find(item => item.audioUrl.endsWith('/' + encodeURIComponent(result.filename!))) || null;
+    const label = result.target.title || track?.title || 'La siguiente canción';
+    if (!track) {
+      waitingForPrefetchRef.current = false;
+      setIsBuffering(false);
+      showToast(`«${label}» se descargó, pero aún no aparece en la biblioteca. Revisa la Bóveda.`);
+      return;
+    }
+    setPrefetchedAutoDjTrack(track);
+    if (waitingForPrefetchRef.current) {
+      waitingForPrefetchRef.current = false;
+      setPrefetchedAutoDjTrack(null);
+      setTracks(previous => [track, ...previous.filter(item => item.id !== track.id)]);
+      playSong(track);
+      showToast(`Reproduciendo «${label}» descargada desde Telegram.`);
+    } else {
+      showToast(`«${label}» lista para la siguiente canción.`);
+    }
+  };
+
+  useEffect(() => {
+    // Al abrir la Bóveda se refresca la biblioteca y el contador de importaciones.
+    if (activeTab === 'vault') void connectFastApiServer(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  const telegramImportTrack = (item: Imported): Track => ({
+      id: `fastapi-telegram-${item.filename.slice(9, -4)}`,
+      title: item.title, artist: item.artist, album: item.album,
+      duration: 200, bpm: 120, keySignature: 'C Major', energy: 50, acousticness: 50,
+      danceability: 50, genre: item.genre,
+      coverUrl: item.coverUrl || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80',
+      audioUrl: `${fastApiUrl}/stream/${encodeURIComponent(item.filename)}`,
+      sourceType: 'fastapi', cachedOffline: false, liked: false, lyrics: [],
+    });
+
+  const playTelegramImport = (item: Imported) => {
+    const track = telegramImportTrack(item);
+    setTracks(previous => [track, ...previous.filter(existing => existing.id !== track.id)]);
+    playSong(track);
+  };
+
+  const onTelegramImportDeleted = (filename: string) => {
+    const id = `fastapi-telegram-${filename.slice(9, -4)}`;
+    if (activeAudioSource === 'music' && currentMusicTrack.id === id) pausePlayback();
+    setTracks(previous => {
+      const next = previous.filter(track => track.id !== id);
+      const currentIndex = next.findIndex(track => track.id === currentMusicTrack.id);
+      setCurrentTrackIndex(Math.max(0, currentIndex));
+      return next;
+    });
+    setTelegramImportCount(previous => Math.max(0, previous - 1));
+    showToast('Copia eliminada del servidor. Las playlists y descargas offline no se modificaron.');
   };
 
   const addTimestampNote = (e: React.FormEvent) => {
@@ -2004,16 +2157,19 @@ export default function App() {
   };
 
   const filteredTracks = useMemo(() => {
-    const colombia = musicRegion === 'CO' || (musicRegion === 'auto' && (navigator.languages?.some(lang => /-CO\b/i.test(lang)) || /-CO\b/i.test(navigator.language)));
-    const hasRealHistory = favorites50List.some(track => !INITIAL_TRACKS.some(demo => demo.id === track.id && track.sourceType === 'curated'));
-    const waitingForRegional = colombia && !hasRealHistory && regionalLoading;
+    const legacyFree = (track: Track) => ['jamendo', 'audius', 'itunes'].includes(track.sourceType)
+      && !offlineTracks.some(offline => offline.id === track.id);
+    const homeTracks = [...regionalTracks, ...offlineTracks, ...tracks, ...personalTracks, ...relatedTracks]
+      .filter(track => !INITIAL_TRACKS.some(demo => demo.id === track.id && track.sourceType === 'curated'))
+      .filter(track => !legacyFree(track));
+    const waitingForRegional = regionalLoading && homeTracks.length === 0;
     const source = activeTab === 'vault' ? offlineTracks : activeTab === 'home'
-      ? (waitingForRegional ? [] : [...regionalTracks, ...offlineTracks, ...tracks, ...personalTracks, ...relatedTracks].filter(track => !INITIAL_TRACKS.some(demo => demo.id === track.id && track.sourceType === 'curated')))
+      ? (waitingForRegional ? [] : homeTracks)
       : tracks;
     const seen = new Set<string>();
     let unique = source.filter(t => !seen.has(t.id) && !!seen.add(t.id));
     if (activeTab === 'home') {
-      const scope = `${currentUser?.id || 'guest'}:${musicRegion}`;
+      const scope = `${currentUser?.id || 'guest'}:${musicRegion}:yt`;
       if (homeOrderRef.current.scope !== scope) homeOrderRef.current = { scope, ids: [], tracks: new Map() };
       const known = new Set(homeOrderRef.current.ids);
       for (const track of unique) {
@@ -2104,25 +2260,33 @@ export default function App() {
 
   const nextInPlaylist = playbackQueue ? stepPlaybackQueue(playbackQueue, 1)?.tracks[playbackQueue.index + 1] : undefined;
   const nextSuggestion = activeAudioSource === 'music' && hasSelectedMusicRef.current
-    ? nextInPlaylist || (autoRadioEnabled ? rankRelated([...relatedTracks, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List].filter(t => !unavailableTrackIds.has(t.id) || isDownloaded(t.id)), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id))[0] : undefined)
+    ? nextInPlaylist || (autoRadioEnabled ? rankRelated([...relatedTracks, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List].filter(t => !['jamendo', 'audius', 'itunes'].includes(t.sourceType) && !INITIAL_TRACKS.some(demo => demo.id === t.id && t.sourceType === 'curated') && (!unavailableTrackIds.has(t.id) || isDownloaded(t.id))), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id))[0] : undefined)
     : undefined;
 
   useEffect(() => {
-    if (!isPlaying || !nextSuggestion?.audioUrl) return;
-    try {
-      const audioUrl = new URL(playbackUrl(nextSuggestion, fastApiUrl, window.location.href), window.location.href);
-      const backend = new URL(fastApiUrl, window.location.href);
-      const expectedPath = `${backend.pathname.replace(/\/$/, '')}/stream_yt`;
-      const videoId = audioUrl.searchParams.get('v');
-      if (audioUrl.origin !== backend.origin || audioUrl.pathname !== expectedPath || !videoId || !/^[\w-]{11}$/.test(videoId)) return;
-      const controller = new AbortController();
-      fetch(`${fastApiUrl}/prepare_stream?v=${encodeURIComponent(videoId)}`, { signal: controller.signal }).catch(() => {});
-      return () => controller.abort();
-    } catch { return; }
-  }, [nextSuggestion?.audioUrl, fastApiUrl, isPlaying]);
+    if (!autoRadioEnabled || activeAudioSource !== 'music' || !isPlaying || !hasSelectedMusicRef.current) return;
+    if (!nextSuggestion || !isYouTubeResult(nextSuggestion)) return;
+    if (telegramImportTarget || backgroundImportBusy || prefetchedAutoDjTrack) return;
+    const key = `${currentMusicTrack.id}->${nextSuggestion.id}`;
+    if (prefetchAttemptedRef.current.has(key)) return;
+    const target = buildTelegramImport(nextSuggestion, Date.now());
+    if (!target) return;
+    // Espera unos segundos para no competir con la reproducción o la importación
+    // de la canción actual; después descarga la siguiente en segundo plano.
+    const timer = window.setTimeout(() => {
+      if (backgroundImportBusy || telegramImportTarget) return;
+      prefetchAttemptedRef.current.add(key);
+      setBackgroundImportBusy(true);
+      setBackgroundImportTarget(target);
+      showToast(`Preparando «${target.title}» mientras escuchas…`);
+    }, 6000);
+    return () => window.clearTimeout(timer);
+  }, [autoRadioEnabled, activeAudioSource, isPlaying, currentMusicTrack.id, nextSuggestion?.id,
+      telegramImportTarget, backgroundImportBusy, prefetchedAutoDjTrack?.id]);
 
   return (
     <div className="min-h-screen bg-[#0b0d10] text-zinc-100 flex flex-col font-sans select-none overflow-x-hidden">
+      <TelegramBackgroundImport username={currentUser?.username} apiUrl={fastApiUrl} target={backgroundImportTarget} onFinished={(result) => void handleBackgroundImportFinished(result)} />
       {/* REPRODUCTOR DEDICADO DE PISTAS DE MÚSICA (SOPORTE COMPLETO DSP, ECUALIZADOR Y 8D) */}
       <audio
         ref={audioRef}
@@ -2146,6 +2310,7 @@ export default function App() {
           setIsBuffering(false);
           console.warn('Music stream event:', err?.code, err?.message);
           if (activeAudioSource === 'music' && isPlaying && err?.code !== MediaError.MEDIA_ERR_ABORTED) {
+            playbackIntentRef.current.pause();
             setIsPlaying(false);
             const track = playbackTrackRef.current;
             if (track) {
@@ -2168,9 +2333,10 @@ export default function App() {
         onError={(e) => {
           const err = (e.target as HTMLAudioElement).error;
           console.warn('Radio stream error/reconnect:', err?.code, err?.message);
-          if (activeAudioSource === 'radio' && isPlaying) {
+          if (activeAudioSource === 'radio' && isPlaying && playbackIntentRef.current.wants('radio')) {
+            const ticket = playbackIntentRef.current.current();
             setTimeout(() => {
-              if (radioAudioRef.current && activeAudioSource === 'radio' && isPlaying) {
+              if (radioAudioRef.current && playbackIntentRef.current.isCurrent(ticket, 'radio')) {
                 console.log('Reconectando señal en vivo de radio tras fallo...');
                 radioAudioRef.current.src = currentRadioStation.audioUrl;
                 radioAudioRef.current.load();
@@ -2180,9 +2346,10 @@ export default function App() {
           }
         }}
         onStalled={() => {
-          if (activeAudioSource === 'radio' && isPlaying) {
+          if (activeAudioSource === 'radio' && isPlaying && playbackIntentRef.current.wants('radio')) {
+            const ticket = playbackIntentRef.current.current();
             setTimeout(() => {
-              if (radioAudioRef.current && activeAudioSource === 'radio' && isPlaying && (radioAudioRef.current.paused || radioAudioRef.current.readyState < 2)) {
+              if (radioAudioRef.current && playbackIntentRef.current.isCurrent(ticket, 'radio') && (radioAudioRef.current.paused || radioAudioRef.current.readyState < 2)) {
                 console.log('Señal de radio estancada, recargando stream...');
                 radioAudioRef.current.src = currentRadioStation.audioUrl;
                 radioAudioRef.current.load();
@@ -2192,7 +2359,7 @@ export default function App() {
           }
         }}
         onEnded={() => {
-          if (activeAudioSource === 'radio' && isPlaying) {
+          if (activeAudioSource === 'radio' && isPlaying && playbackIntentRef.current.wants('radio')) {
             if (radioAudioRef.current) {
               radioAudioRef.current.src = currentRadioStation.audioUrl;
               radioAudioRef.current.load();
@@ -2498,7 +2665,7 @@ export default function App() {
               { id: 'favorites', label: 'Favoritas & +50%', icon: Heart, badge: favorites50List.length },
               { id: 'radio', label: 'Radio en Vivo (FM/AM)', icon: Radio, badge: '🔴 LIVE' },
               { id: 'dsp-studio', label: 'Ecualizador DSP & Boost', icon: Sliders, badge: `${Math.round(volume * 100)}%` },
-              { id: 'vault', label: 'Bóveda Offline', icon: ShieldCheck, badge: offlineTracks.length }
+              { id: 'vault', label: 'Bóveda Offline', icon: ShieldCheck, badge: offlineTracks.length + telegramImportCount }
             ].map((item) => {
               const Icon = item.icon;
               const isActive = activeTab === item.id;
@@ -3265,7 +3432,7 @@ export default function App() {
                     Buscar Música
                   </h3>
                   <p className="text-xs text-zinc-400 mt-0.5">
-                    La búsqueda de YouTube está disponible, pero su reproducción está deshabilitada por seguridad. Las fuentes libres incluyen algunas vistas previas.
+                    Elige 10 o 50 resultados de YouTube vía yt-dlp; se muestran de 10 en 10. Al tocar una canción, la app buscará y descargará automáticamente la mejor coincidencia MP3.
                   </p>
                 </div>
               </div>
@@ -3273,17 +3440,25 @@ export default function App() {
               {/* BARRA DE BÚSQUEDA CON AUTOCOMPLETADO */}
               <div className="relative">
                 <div className="flex gap-2">
-                  <select aria-label="Fuente de búsqueda" value={searchProvider} onChange={e => {
-                    const provider = e.target.value as 'free' | 'stream';
-                    searchProviderRef.current = provider;
-                    if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-                    setSearchSuggestions([]);
-                    setIsSuggestionsOpen(false);
-                    setSearchProvider(provider);
-                  }} className="bg-zinc-900 text-sm rounded-xl px-2">
-                    <option value="stream">YouTube · streaming</option>
-                    <option value="free">Fuentes libres</option>
-                  </select>
+                  <span className="inline-flex items-center rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 text-xs font-semibold text-emerald-300 whitespace-nowrap">
+                    YouTube · yt-dlp
+                  </span>
+                  <label className="inline-flex items-center gap-1.5 text-[11px] text-zinc-400 whitespace-nowrap">
+                    <span className="hidden sm:inline">Mostrar</span>
+                    <select aria-label="Cantidad de resultados de búsqueda" value={searchResultLimit}
+                      onChange={(event) => {
+                        const limit = Number(event.target.value) === 50 ? 50 : 10;
+                        setSearchResultLimit(limit);
+                        try { localStorage.setItem('diaz-search-limit', String(limit)); } catch {}
+                        if (onlineSearchResults.length > 0 && searchQuery.trim().length >= 2) {
+                          void executeOnlineSearch(searchQuery, limit);
+                        }
+                      }}
+                      className="rounded-lg border border-zinc-700 bg-zinc-900 px-2 py-2 text-xs text-zinc-200 focus:outline-none focus:border-emerald-500">
+                      <option value={10}>10</option>
+                      <option value={50}>50</option>
+                    </select>
+                  </label>
                   <div className="relative flex-1">
                     <Search className="w-4 h-4 text-zinc-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                     <input
@@ -3356,6 +3531,11 @@ export default function App() {
                 )}
               </div>
 
+              {/* La integración solo aparece como tarjeta transitoria al pulsar una canción de YouTube. */}
+              <div className={telegramImportTarget ? '' : 'hidden'}>
+                <TelegramStatus key={`import:${currentUser?.username || ''}:${fastApiUrl}`} mode="import" username={currentUser?.username} apiUrl={fastApiUrl} onPublished={(filename) => void onTelegramPublished(filename)} onPlayImported={playTelegramImport} onAddImported={item => setPlaylistModalTrack(telegramImportTrack(item))} onDeletedImported={onTelegramImportDeleted} importTarget={telegramImportTarget} onImportHandled={(nonce) => setTelegramImportTarget(current => current && current.nonce === nonce ? null : current)} />
+              </div>
+
               {/* LISTA DE RESULTADOS PAGINADA (MÁXIMO 10 POR PÁGINA Y SCROLL CONTROLADO) */}
               {onlineSearchResults.length > 0 ? (
                 <div className="space-y-3">
@@ -3370,10 +3550,12 @@ export default function App() {
 
                   {/* CONTENEDOR CON SCROLL DELIMITADO PARA EVITAR DESCUADRES */}
                   <div className="max-h-[520px] overflow-y-auto pr-1 space-y-2 rounded-xl pb-4">
-                    {paginatedSearchResults.map((track) => (
+                    {paginatedSearchResults.map((track) => {
+                      const youtubeImport = isYouTubeResult(track);
+                      return (
                       <div
                         key={track.id}
-                        onClick={() => playSong(track)}
+                        onClick={() => youtubeImport ? requestTelegramImport(track) : playSong(track)}
                         className="group flex items-center justify-between p-2.5 rounded-xl border border-transparent hover:border-zinc-700 bg-zinc-900/50 hover:bg-zinc-800/60 cursor-pointer transition"
                       >
                         <div className="flex items-center gap-3 min-w-0 flex-1">
@@ -3402,8 +3584,9 @@ export default function App() {
                             <p className="text-xs text-zinc-400 truncate">
                               {track.artist} {track.genre ? `• ${track.genre}` : ''}
                             </p>
-                            <p className={`text-[10px] ${unavailableTrackIds.has(track.id) && !isDownloaded(track.id) ? 'text-amber-300' : 'text-zinc-500'}`}>
-                              {unavailableTrackIds.has(track.id) && !isDownloaded(track.id) ? 'No disponible · toca para reintentar' : trackSourceLabel(track)}
+                            <p className={`text-[10px] ${!youtubeImport && unavailableTrackIds.has(track.id) && !isDownloaded(track.id) ? 'text-amber-300' : youtubeImport ? 'text-emerald-300' : 'text-zinc-500'}`}>
+                              {youtubeImport ? 'YouTube · toca para descargar la canción'
+                                : unavailableTrackIds.has(track.id) && !isDownloaded(track.id) ? 'No disponible · toca para reintentar' : trackSourceLabel(track)}
                             </p>
                             {track.sourceType !== 'itunes' && !track.id.startsWith('itunes-') && <span className="text-[10px] text-zinc-500 font-mono">{formatTime(track.duration)}</span>}
                           </div>
@@ -3411,35 +3594,37 @@ export default function App() {
 
                         {/* ACCIONES DE LA FILA */}
                         <div className="flex items-center gap-1.5 ml-2" onClick={(e) => e.stopPropagation()}>
-                          {/* Añadir a Playlist */}
-                          <button
-                            onClick={() => setPlaylistModalTrack(track)}
-                            title="Añadir a Playlist"
-                            className="p-2 rounded-xl border border-zinc-800 hover:border-cyan-500 text-zinc-400 hover:text-cyan-300 transition"
-                          >
-                            <ListPlus className="w-4 h-4" />
-                          </button>
+                          {!youtubeImport && (
+                            <button
+                              onClick={() => setPlaylistModalTrack(track)}
+                              title="Añadir a Playlist"
+                              className="p-2 rounded-xl border border-zinc-800 hover:border-cyan-500 text-zinc-400 hover:text-cyan-300 transition"
+                            >
+                              <ListPlus className="w-4 h-4" />
+                            </button>
+                          )}
 
-                          {/* Descargar a Bóveda Offline */}
-                          <button
-                            onClick={() => toggleOfflineVault(track.id, undefined, track)}
-                            className="p-2 rounded-xl border border-zinc-800 hover:border-emerald-500 text-zinc-400 hover:text-emerald-400 transition"
-                            title="Descargar para escuchar sin internet"
-                          >
-                            <Download className="w-4 h-4" />
-                          </button>
+                          {!youtubeImport && (
+                            <button
+                              onClick={() => toggleOfflineVault(track.id, undefined, track)}
+                              className="p-2 rounded-xl border border-zinc-800 hover:border-emerald-500 text-zinc-400 hover:text-emerald-400 transition"
+                              title="Descargar para escuchar sin internet"
+                            >
+                              <Download className="w-4 h-4" />
+                            </button>
+                          )}
 
-                          {/* Reproducir */}
                           <button
-                            onClick={() => playSong(track)}
+                            onClick={() => youtubeImport ? requestTelegramImport(track) : playSong(track)}
                             className={`p-2 rounded-xl bg-zinc-800 group-hover:${accentClasses.bg} text-zinc-300 group-hover:text-black transition`}
-                            title="Reproducir ahora"
+                            title={youtubeImport ? 'Buscar y descargar la canción' : 'Reproducir ahora'}
                           >
-                            <Play className="w-4 h-4 fill-current ml-0.5" />
+                            {youtubeImport ? <ArrowRight className="w-4 h-4" /> : <Play className="w-4 h-4 fill-current ml-0.5" />}
                           </button>
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
 
                   {/* BARRA DE PAGINACIÓN */}
@@ -4012,18 +4197,16 @@ export default function App() {
                     ) : (
                       <>
                         <Flame className={`w-4 h-4 ${accentClasses.text}`} />
-                        Tendencias & Recomendaciones
+                        Tendencias de YouTube
                       </>
                     )}
                   </h3>
                   <p className="text-xs text-zinc-400">
                     {activeTab === 'vault'
                       ? 'Canciones descargadas en la memoria de tu dispositivo. Escucha sin consumir datos.'
-                      : favorites50List.length > 0 || hasSelectedMusicRef.current
-                        ? 'Una mezcla basada en lo que escuchas y en tu canción actual.'
-                        : regionalTracks.length > 0
-                          ? 'Para empezar: una selección de sonidos de Colombia.'
-                          : 'Explora música para empezar; tus sugerencias mejoran al escuchar.'}
+                      : regionalLoading
+                        ? 'Buscando tendencias de YouTube…'
+                        : 'Tendencias de YouTube para tu región y tus gustos. Toca una canción para descargarla desde Telegram.'}
                   </p>
                   {activeTab === 'home' && <label className="inline-flex items-center gap-2 mt-2 text-xs text-zinc-400">
                     Región inicial
@@ -4042,17 +4225,22 @@ export default function App() {
                 </span>
               </div>
 
+              {activeTab === 'vault' && (
+                <TelegramStatus key={`library:${currentUser?.username || ''}:${fastApiUrl}`} mode="library" username={currentUser?.username} apiUrl={fastApiUrl} onPublished={(filename) => void onTelegramPublished(filename)} onPlayImported={playTelegramImport} onAddImported={item => setPlaylistModalTrack(telegramImportTrack(item))} onDeletedImported={onTelegramImportDeleted} />
+              )}
+
               <div className="space-y-1.5">
                 {filteredTracks.length === 0 && <p role="status" className="px-2 py-4 text-sm text-zinc-400">
                   {regionalLoading && activeTab === 'home' ? 'Buscando música para comenzar…' : 'No hay canciones disponibles aquí. Prueba una búsqueda o revisa la conexión.'}
                 </p>}
                 {paginatedHomeTracks.map((track) => {
                   const isCurrent = activeAudioSource === 'music' && currentMusicTrack.id === track.id;
+                  const youtubeImport = isYouTubeResult(track);
 
                   return (
                     <div
                       key={track.id}
-                      onClick={() => playSong(track)}
+                      onClick={() => youtubeImport ? requestTelegramImport(track) : playSong(track)}
                       className={`group flex items-center justify-between p-2.5 rounded-xl border transition cursor-pointer ${
                         isCurrent
                           ? `bg-zinc-800/90 ${accentClasses.border} shadow-md`
@@ -4109,24 +4297,34 @@ export default function App() {
                           <span className="text-[10px] text-zinc-500">{track.genre}</span>
                         </div>
 
-                        {/* Guardar en Bóveda Offline */}
-                        <button
-                          onClick={(e) => toggleOfflineVault(track.id, e, track)}
-                          title={isDownloaded(track.id) ? 'Guardada en memoria offline' : 'Guardar en Bóveda Offline'}
-                          className={`p-2 rounded-xl border transition ${
-                            isDownloaded(track.id)
-                              ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
-                              : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-600'
-                          }`}
-                        >
-                          {downloadingId === track.id ? (
-                            <RefreshCw className="w-4 h-4 animate-spin text-emerald-400" />
-                          ) : isDownloaded(track.id) ? (
-                            <CheckCircle2 className="w-4 h-4" />
-                          ) : (
+                        {/* Descargar desde Telegram o guardar offline */}
+                        {youtubeImport ? (
+                          <button
+                            onClick={(e) => { e.stopPropagation(); requestTelegramImport(track); }}
+                            title="Buscar y descargar la canción"
+                            className="p-2 rounded-xl border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 transition"
+                          >
                             <Download className="w-4 h-4" />
-                          )}
-                        </button>
+                          </button>
+                        ) : (
+                          <button
+                            onClick={(e) => toggleOfflineVault(track.id, e, track)}
+                            title={isDownloaded(track.id) ? 'Guardada en memoria offline' : 'Guardar en Bóveda Offline'}
+                            className={`p-2 rounded-xl border transition ${
+                              isDownloaded(track.id)
+                                ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
+                                : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-white hover:border-zinc-600'
+                            }`}
+                          >
+                            {downloadingId === track.id ? (
+                              <RefreshCw className="w-4 h-4 animate-spin text-emerald-400" />
+                            ) : isDownloaded(track.id) ? (
+                              <CheckCircle2 className="w-4 h-4" />
+                            ) : (
+                              <Download className="w-4 h-4" />
+                            )}
+                          </button>
+                        )}
 
                         {/* Exportar MP3 sin DRM */}
                         {isDownloaded(track.id) && (
@@ -4144,26 +4342,30 @@ export default function App() {
                         )}
 
                         {/* Añadir a Playlist */}
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setPlaylistModalTrack(track);
-                          }}
-                          title="Añadir a una playlist"
-                          className="p-2 rounded-xl border border-zinc-800 text-zinc-400 hover:text-cyan-300 hover:border-cyan-500/50 bg-zinc-900 transition"
-                        >
-                          <ListPlus className="w-4 h-4" />
-                        </button>
+                        {!youtubeImport && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setPlaylistModalTrack(track);
+                            }}
+                            title="Añadir a una playlist"
+                            className="p-2 rounded-xl border border-zinc-800 text-zinc-400 hover:text-cyan-300 hover:border-cyan-500/50 bg-zinc-900 transition"
+                          >
+                            <ListPlus className="w-4 h-4" />
+                          </button>
+                        )}
 
                         {/* Like */}
-                        <button
-                          onClick={(e) => toggleLike(track.id, e)}
-                          className={`p-2 rounded-xl transition ${
-                            track.liked ? 'text-rose-500' : 'text-zinc-500 hover:text-zinc-300'
-                          }`}
-                        >
-                          <Heart className={`w-4 h-4 ${track.liked ? 'fill-current' : ''}`} />
-                        </button>
+                        {!youtubeImport && (
+                          <button
+                            onClick={(e) => toggleLike(track.id, e)}
+                            className={`p-2 rounded-xl transition ${
+                              track.liked ? 'text-rose-500' : 'text-zinc-500 hover:text-zinc-300'
+                            }`}
+                          >
+                            <Heart className={`w-4 h-4 ${track.liked ? 'fill-current' : ''}`} />
+                          </button>
+                        )}
                       </div>
                     </div>
                   );
@@ -5055,7 +5257,7 @@ export default function App() {
                 Cerrar
               </button>
               <button
-                onClick={connectFastApiServer}
+                onClick={() => void connectFastApiServer()}
                 disabled={serverStatus === 'connecting'}
                 className={`${accentClasses.bg} text-black font-extrabold text-xs px-5 py-2 rounded-xl transition flex items-center gap-1.5 shadow-lg`}
               >
