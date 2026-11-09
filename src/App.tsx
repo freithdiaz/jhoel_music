@@ -41,6 +41,7 @@ import {
   releaseScreenWakeLock
 } from './services/mediaSession';
 import { createPlaybackIntent } from './services/playbackIntent';
+import { watchAudioContextRecovery } from './services/audioContextRecovery';
 import {
   saveTrackOffline,
   removeTrackOffline,
@@ -1073,6 +1074,11 @@ export default function App() {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       const ctx = new AudioCtx();
       audioCtxRef.current = ctx;
+      watchAudioContextRecovery(
+        ctx,
+        () => playbackIntentRef.current.wants('music'),
+        error => console.warn('No se pudo recuperar el AudioContext durante la reproducción:', error)
+      );
 
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 128;
