@@ -53,6 +53,7 @@ import { rankRelated, recommendationQuery, relatedReason, trackGenre } from './s
 import { playbackUrl } from './services/playbackUrl';
 import { playbackFailureMessage, trackSourceLabel } from './services/musicSources';
 import { createPlaybackQueue, stepPlaybackQueue, PlaybackQueue } from './services/playbackQueue';
+import { AudioDeck, standbyDeck as selectStandbyDeck, canReusePreloadedDeck, shouldPrimeStandby } from './services/audioDeck';
 import { resolveSpotifyTrackViaRea } from './services/reaBridge';
 import {
   getStoredJamendoClientId,
@@ -737,6 +738,7 @@ export default function App() {
   // Sintonizar emisora de radio con 0 cortes (Sin mezclar con la lista de canciones)
   const playRadioStation = (station: Track) => {
     const ticket = playbackIntentRef.current.play('radio');
+    cancelStandbyPrime();
     updatePlaybackQueue(null);
     nextRequestRef.current++;
     setIsBuffering(false);
@@ -795,7 +797,21 @@ export default function App() {
   }, [fastApiUrl]);
 
   // Audio References (Doble canal independiente: Música DSP y Radio Nativa sin cortes)
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  // La música usa dos decks A/B: mientras uno suena, el otro precarga la siguiente
+  // pista. Al terminar la actual se intercambian sin dejar un silencio que permita
+  // a Chrome Android suspender el JavaScript y retirar los controles multimedia.
+  const audioDeckARef = useRef<HTMLAudioElement | null>(null);
+  const audioDeckBRef = useRef<HTMLAudioElement | null>(null);
+  const activeDeckRef = useRef<'a' | 'b'>('a');
+  const deckUrlsRef = useRef<{ a: string | null; b: string | null }>({ a: null, b: null });
+  const standbyTrackIdRef = useRef<string | null>(null);
+  const standbyPrimedRef = useRef(false);
+  const handleNextTrackRef = useRef<() => void>(() => {});
+  const audioRef = useMemo(() => ({
+    get current(): HTMLAudioElement | null {
+      return activeDeckRef.current === 'a' ? audioDeckARef.current : audioDeckBRef.current;
+    }
+  }), []);
   const radioAudioRef = useRef<HTMLAudioElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -803,7 +819,8 @@ export default function App() {
   const lowpassNodeRef = useRef<BiquadFilterNode | null>(null);
   const pannerNodeRef = useRef<StereoPannerNode | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
-  const sourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
+  const sourceNodesRef = useRef<Record<'a' | 'b', MediaElementAudioSourceNode | null>>({ a: null, b: null });
+  const deckGainNodesRef = useRef<Record<'a' | 'b', GainNode | null>>({ a: null, b: null });
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const synthIntervalRef = useRef<any>(null);
 
@@ -812,6 +829,31 @@ export default function App() {
     audioUrl: '', coverUrl: '/icons/icon.svg', cachedOffline: false, liked: false, lyrics: []
   };
   const currentTrack = activeAudioSource === 'radio' ? currentRadioStation : currentMusicTrack;
+
+  const deckElement = (deck: AudioDeck) => deck === 'a' ? audioDeckARef.current : audioDeckBRef.current;
+  const standbyDeck = (): AudioDeck => selectStandbyDeck(activeDeckRef.current);
+  const isActiveDeck = (deck: AudioDeck) => activeDeckRef.current === deck;
+  const normalizeAudioUrl = (url: string) => {
+    try { return new URL(url, window.location.href).href; } catch { return url; }
+  };
+  const setDeckGain = (deck: 'a' | 'b', value: number) => {
+    const node = deckGainNodesRef.current[deck];
+    const ctx = audioCtxRef.current;
+    if (node && ctx) {
+      try { node.gain.setTargetAtTime(value, ctx.currentTime, 0.02); } catch {}
+    }
+  };
+  const cancelStandbyPrime = () => {
+    if (!standbyPrimedRef.current) return;
+    standbyPrimedRef.current = false;
+    const deck = standbyDeck();
+    const element = deckElement(deck);
+    if (element) {
+      element.pause();
+      try { element.currentTime = 0; } catch {}
+    }
+    setDeckGain(deck, 1);
+  };
 
   const showToast = (msg: string) => {
     setNotification(msg);
@@ -1068,12 +1110,32 @@ export default function App() {
   // ==========================================
   // MOTOR WEB AUDIO API DSP
   // ==========================================
+  const connectDeckSource = (ctx: AudioContext, eqNodes: BiquadFilterNode[], deck: 'a' | 'b', element: HTMLAudioElement | null) => {
+    if (!element || sourceNodesRef.current[deck] || !eqNodes.length) return;
+    try {
+      const source = ctx.createMediaElementSource(element);
+      const deckGain = ctx.createGain();
+      deckGain.gain.value = 1;
+      source.connect(deckGain);
+      deckGain.connect(eqNodes[0]);
+      sourceNodesRef.current[deck] = source;
+      deckGainNodesRef.current[deck] = deckGain;
+    } catch (err) {
+      console.warn(`No se pudo conectar el deck ${deck} al motor DSP:`, err);
+    }
+  };
+
   const initWebAudio = () => {
-    if (audioCtxRef.current) return;
+    if (audioCtxRef.current) {
+      connectDeckSource(audioCtxRef.current, eqNodesRef.current, 'a', audioDeckARef.current);
+      connectDeckSource(audioCtxRef.current, eqNodesRef.current, 'b', audioDeckBRef.current);
+      return;
+    }
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       const ctx = new AudioCtx();
       audioCtxRef.current = ctx;
+      if (ctx.state === 'suspended') ctx.resume().catch(console.warn);
       watchAudioContextRecovery(
         ctx,
         () => playbackIntentRef.current.wants('music'),
@@ -1107,21 +1169,19 @@ export default function App() {
       });
       eqNodesRef.current = eqNodes;
 
-      if (audioRef.current && !sourceNodeRef.current) {
-        const source = ctx.createMediaElementSource(audioRef.current);
-        sourceNodeRef.current = source;
+      let prevNode: AudioNode = eqNodes[0];
+      eqNodes.slice(1).forEach((node) => {
+        prevNode.connect(node);
+        prevNode = node;
+      });
+      prevNode.connect(lowpass);
+      lowpass.connect(panner);
+      panner.connect(masterGain);
+      masterGain.connect(analyser);
+      analyser.connect(ctx.destination);
 
-        let prevNode: AudioNode = source;
-        eqNodes.forEach((node) => {
-          prevNode.connect(node);
-          prevNode = node;
-        });
-        prevNode.connect(lowpass);
-        lowpass.connect(panner);
-        panner.connect(masterGain);
-        masterGain.connect(analyser);
-        analyser.connect(ctx.destination);
-      }
+      connectDeckSource(ctx, eqNodes, 'a', audioDeckARef.current);
+      connectDeckSource(ctx, eqNodes, 'b', audioDeckBRef.current);
     } catch (err) {
       console.warn('Fallback a modo visualización reactiva:', err);
     }
@@ -1197,19 +1257,20 @@ export default function App() {
   }, [lowpassFreq]);
 
   useEffect(() => {
-    if (audioRef.current) {
-      audioRef.current.playbackRate = playbackSpeed;
-      if ('preservesPitch' in audioRef.current) {
-        (audioRef.current as any).preservesPitch = activePreset === 'normal';
+    for (const audio of [audioDeckARef.current, audioDeckBRef.current]) {
+      if (!audio) continue;
+      audio.playbackRate = playbackSpeed;
+      if ('preservesPitch' in audio) {
+        (audio as any).preservesPitch = activePreset === 'normal';
       }
     }
   }, [playbackSpeed, activePreset]);
 
   useEffect(() => {
     const targetVol = isMuted ? 0 : Math.min(1, Math.max(0, volume));
-    if (audioRef.current) {
+    for (const audio of [audioDeckARef.current, audioDeckBRef.current]) {
       // El elemento HTMLAudioElement solo acepta rango [0, 1]
-      audioRef.current.volume = targetVol;
+      if (audio) audio.volume = targetVol;
     }
     if (radioAudioRef.current) {
       radioAudioRef.current.volume = targetVol;
@@ -1307,8 +1368,13 @@ export default function App() {
   useEffect(() => {
     const handleVisibilityResume = () => {
       if (document.visibilityState === 'visible') {
+        cancelStandbyPrime();
         if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
           audioCtxRef.current.resume().catch(console.warn);
+        }
+        if (activeAudioSource === 'music' && audioRef.current?.ended) {
+          handleNextTrackRef.current();
+          return;
         }
         if (isPlaying && playbackIntentRef.current.wants(activeAudioSource)) {
           if (activeAudioSource === 'radio') {
@@ -1343,6 +1409,7 @@ export default function App() {
     nextRequestRef.current++;
     playbackIntentRef.current.pause();
     if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+    cancelStandbyPrime();
     if (activeAudioSource === 'radio') radioAudioRef.current?.pause();
     else audioRef.current?.pause();
     setIsPlaying(false);
@@ -1357,6 +1424,12 @@ export default function App() {
     }
     if (source === 'music' && currentMusicTrack.sourceType === 'youtube') {
       showToast('Usa los controles del reproductor de YouTube.');
+      return;
+    }
+    // Si el navegador suspendió el JS justo al terminar la pista, al volver
+    // a primer plano el elemento puede seguir en estado "ended". Avanzamos.
+    if (source === 'music' && audioRef.current?.ended) {
+      handleNextTrackRef.current();
       return;
     }
     nextRequestRef.current++;
@@ -1591,6 +1664,90 @@ export default function App() {
     else resumePlayback();
   };
 
+  const resolvePlayableMusic = (track: Track):
+    | { ok: true; sourceTrack: Track; resolvedUrl: string }
+    | { ok: false; reason: 'offline' | 'no-url' } => {
+    const offlineCopy = track.sourceType === 'youtube' ? undefined : offlineTracksRef.current.find(item => item.id === track.id);
+    if (!navigator.onLine && !offlineCopy) return { ok: false, reason: 'offline' };
+    const sourceTrack: Track = track.sourceType === 'youtube' && /^yt-[A-Za-z0-9_-]{11}$/.test(track.id)
+      ? { ...track, sourceType: 'invidious', audioUrl: `/stream_yt?v=${track.id.slice(3)}` }
+      : offlineCopy || track;
+    const resolvedUrl = playbackUrl(sourceTrack, fastApiUrl, window.location.href);
+    if (!resolvedUrl) return { ok: false, reason: 'no-url' };
+    return { ok: true, sourceTrack, resolvedUrl };
+  };
+
+  // Deja la siguiente pista lista en el deck que no está sonando. Así, cuando
+  // termina la actual, no hay que abrir una conexión nueva ni esperar al
+  // servidor: el cambio ocurre en milisegundos y el media session no se pierde.
+  const prepareStandbyTrack = (upcoming: Track | null | undefined) => {
+    if (!upcoming || activeAudioSource !== 'music' || useSynthFallback) return;
+    if (!playbackIntentRef.current.wants('music')) return;
+    const resolved = resolvePlayableMusic(upcoming);
+    if (!resolved.ok) return;
+    const deck = standbyDeck();
+    const element = deckElement(deck);
+    if (!element || isActiveDeck(deck)) return;
+    const normalized = normalizeAudioUrl(resolved.resolvedUrl);
+    if (deckUrlsRef.current[deck] === normalized && !element.error) {
+      // Si el deck ya se usó antes, vuelve al inicio para que el intercambio
+      // no tenga que hacer un seek costoso justo al terminar la pista actual.
+      if (element.ended || element.currentTime > 0.05) {
+        try { element.currentTime = 0; } catch {}
+      }
+      standbyTrackIdRef.current = upcoming.id;
+      return;
+    }
+    try {
+      cancelStandbyPrime();
+      element.pause();
+      element.preload = 'auto';
+      element.src = resolved.resolvedUrl;
+      element.load();
+      deckUrlsRef.current[deck] = normalized;
+      standbyTrackIdRef.current = upcoming.id;
+    } catch (error) {
+      deckUrlsRef.current[deck] = null;
+      standbyTrackIdRef.current = null;
+      console.warn('No se pudo precargar la siguiente pista:', error);
+    }
+  };
+
+  const startMusicPlayback = (
+    audio: HTMLAudioElement,
+    playbackRequest: number,
+    track: Track,
+    sourceTrack: Track,
+    timeoutMs: number
+  ) => {
+    playbackTimeoutRef.current = setTimeout(() => {
+      if (nextRequestRef.current !== playbackRequest || audio.readyState >= 3) return;
+      playbackIntentRef.current.pause();
+      audio.pause();
+      setIsPlaying(false);
+      setIsBuffering(false);
+      setUnavailableTrackIds(previous => new Set(previous).add(track.id));
+      showToast(track.audioUrl?.startsWith('blob:')
+        ? 'El archivo local ya no está disponible. Vuelve a cargarlo o búscalo en la bóveda offline.'
+        : 'La canción tardó demasiado en cargar. Revisa el servidor o prueba otra pista.');
+    }, timeoutMs);
+    audio.play().then(() => {
+      if (nextRequestRef.current !== playbackRequest) return;
+      if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+      setUnavailableTrackIds(previous => { const next = new Set(previous); next.delete(track.id); return next; });
+      showToast(`Reproduciendo: ${track.title}`);
+    }).catch((err) => {
+      if (nextRequestRef.current !== playbackRequest || err?.name === 'AbortError') return;
+      if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+      console.warn('No se pudo reproducir la pista:', err);
+      playbackIntentRef.current.pause();
+      setIsPlaying(false);
+      setIsBuffering(false);
+      setUnavailableTrackIds(previous => new Set(previous).add(track.id));
+      showToast(playbackFailureMessage(sourceTrack));
+    });
+  };
+
   const playSong = (track: Track, rememberPrevious = true, preserveQueue = false) => {
     if (!track) return;
     nextRequestRef.current++;
@@ -1600,21 +1757,21 @@ export default function App() {
       showToast('Espera un momento mientras se abre la bóveda offline.');
       return;
     }
-    const offlineCopy = track.sourceType === 'youtube' ? undefined : offlineTracksRef.current.find(item => item.id === track.id);
-    if (!navigator.onLine && !offlineCopy) {
+    const resolved = resolvePlayableMusic(track);
+    if (resolved.ok === false) {
+      cancelStandbyPrime();
       pausePlayback();
-      showToast('Esta canción no está descargada en este dispositivo.');
+      showToast(resolved.reason === 'offline'
+        ? 'Esta canción no está descargada en este dispositivo.'
+        : 'Esta canción no tiene un enlace de audio disponible. Búscala de nuevo.');
       return;
     }
-    const sourceTrack: Track = track.sourceType === 'youtube' && /^yt-[A-Za-z0-9_-]{11}$/.test(track.id)
-      ? { ...track, sourceType: 'invidious', audioUrl: `/stream_yt?v=${track.id.slice(3)}` }
-      : offlineCopy || track;
-    const resolvedUrl = playbackUrl(sourceTrack, fastApiUrl, window.location.href);
-    if (!resolvedUrl) {
-      pausePlayback();
-      showToast('Esta canción no tiene un enlace de audio disponible. Búscala de nuevo.');
-      return;
-    }
+    const { sourceTrack, resolvedUrl } = resolved;
+    const candidateDeck = standbyDeck();
+    const candidateAudio = deckElement(candidateDeck);
+    const normalizedUrl = normalizeAudioUrl(resolvedUrl);
+    const canReuseStandby = !!candidateAudio
+      && canReusePreloadedDeck(deckUrlsRef.current[candidateDeck], normalizedUrl, candidateAudio.readyState, !!candidateAudio.error);
     // Reannounce the next track before replacing the ended media element.
     // Android/Chrome may retire the previous Media Session at the track boundary.
     updateMediaSessionMetadata(sourceTrack);
@@ -1654,36 +1811,33 @@ export default function App() {
     if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
       audioCtxRef.current.resume();
     }
+    initWebAudio();
 
-    if (audioRef.current) {
-      audioRef.current.src = resolvedUrl;
-      audioRef.current.load();
-      playbackTimeoutRef.current = setTimeout(() => {
-        if (nextRequestRef.current !== playbackRequest || !audioRef.current || audioRef.current.readyState >= 3) return;
-        playbackIntentRef.current.pause();
-        audioRef.current.pause();
-        setIsPlaying(false);
-        setIsBuffering(false);
-        setUnavailableTrackIds(previous => new Set(previous).add(track.id));
-        showToast(track.audioUrl?.startsWith('blob:')
-          ? 'El archivo local ya no está disponible. Vuelve a cargarlo o búscalo en la bóveda offline.'
-          : 'La canción tardó demasiado en cargar. Revisa el servidor o prueba otra pista.');
-      }, 25000);
-      audioRef.current.play().then(() => {
-        if (nextRequestRef.current !== playbackRequest) return;
-        if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
-        setUnavailableTrackIds(previous => { const next = new Set(previous); next.delete(track.id); return next; });
-        showToast(`Reproduciendo: ${track.title}`);
-      }).catch((err) => {
-        if (nextRequestRef.current !== playbackRequest || err?.name === 'AbortError') return;
-        if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
-        console.warn('No se pudo reproducir la pista:', err);
-        playbackIntentRef.current.pause();
-        setIsPlaying(false);
-        setIsBuffering(false);
-        setUnavailableTrackIds(previous => new Set(previous).add(track.id));
-        showToast(playbackFailureMessage(sourceTrack));
-      });
+    if (canReuseStandby && candidateAudio) {
+      const previousAudio = audioRef.current;
+      activeDeckRef.current = candidateDeck;
+      standbyPrimedRef.current = false;
+      standbyTrackIdRef.current = null;
+      if (previousAudio && previousAudio !== candidateAudio) previousAudio.pause();
+      try { candidateAudio.currentTime = 0; } catch {}
+      candidateAudio.playbackRate = playbackSpeed;
+      candidateAudio.volume = isMuted ? 0 : Math.min(1, Math.max(0, volume));
+      setDeckGain(candidateDeck, 1);
+      if (Number.isFinite(candidateAudio.duration) && candidateAudio.duration > 0) {
+        setDuration(candidateAudio.duration);
+      } else {
+        setDuration(track.duration || sourceTrack.duration || 0);
+      }
+      startMusicPlayback(candidateAudio, playbackRequest, track, sourceTrack, 12000);
+      return;
+    }
+
+    cancelStandbyPrime();
+    const activeAudio = audioRef.current;
+    if (activeAudio) {
+      activeAudio.src = resolvedUrl;
+      activeAudio.load();
+      startMusicPlayback(activeAudio, playbackRequest, track, sourceTrack, 25000);
     }
   };
 
@@ -1707,6 +1861,39 @@ export default function App() {
     // Algoritmo Inteligente Spotify: Al superar el 50% de la canción se guarda en favoritas y perfil de gustos
     const audio = audioRef.current;
     const actualDuration = audio.duration;
+
+    // Con la pantalla apagada, Chrome puede suspender el JS si no hay audio.
+    // Arrancamos el deck precargado en silencio un instante antes del final;
+    // al llegar el evento "ended" ya hay reproducción activa y el cambio es
+    // inmediato, sin ventana de silencio ni pérdida de los controles.
+    const remaining = actualDuration - now;
+    const standbyDeckId = standbyDeck();
+    const standby = deckElement(standbyDeckId);
+    const standbyGain = deckGainNodesRef.current[standbyDeckId];
+    const standbyContext = audioCtxRef.current;
+    if (standby && standbyGain && standbyContext && shouldPrimeStandby(
+      document.visibilityState,
+      standbyPrimedRef.current,
+      remaining,
+      !!standbyTrackIdRef.current,
+      standby.readyState,
+      !!standby.error,
+      standby.paused
+    )) {
+      try {
+        standby.currentTime = 0;
+        standbyGain.gain.setValueAtTime(0.0001, standbyContext.currentTime);
+        standbyPrimedRef.current = true;
+        standby.play().catch(() => {
+          standbyPrimedRef.current = false;
+          try { standbyGain.gain.setValueAtTime(1, standbyContext.currentTime); } catch {}
+          standby.pause();
+        });
+      } catch {
+        standbyPrimedRef.current = false;
+      }
+    }
+
     const progress = listeningRef.current;
     const wall = performance.now();
     if (progress.trackId !== currentMusicTrack.id) {
@@ -1760,6 +1947,7 @@ export default function App() {
       }
       updatePlaybackQueue(null);
       if (!autoRadioEnabled) {
+        cancelStandbyPrime();
         audioRef.current?.pause();
         playbackIntentRef.current.pause();
         setIsPlaying(false);
@@ -1779,6 +1967,7 @@ export default function App() {
 
     if (backgroundImportBusy) {
       waitingForPrefetchRef.current = true;
+      cancelStandbyPrime();
       audioRef.current?.pause();
       playbackIntentRef.current.pause();
       setIsPlaying(false);
@@ -1801,6 +1990,7 @@ export default function App() {
           const target = buildTelegramImport(candidates[0], Date.now());
           if (target) {
             waitingForPrefetchRef.current = true;
+            cancelStandbyPrime();
             audioRef.current?.pause();
             playbackIntentRef.current.pause();
             setIsPlaying(false);
@@ -1814,6 +2004,7 @@ export default function App() {
         playSong(candidates[0]);
         return;
       }
+      cancelStandbyPrime();
       audioRef.current?.pause();
       playbackIntentRef.current.pause();
       setIsPlaying(false);
@@ -1823,6 +2014,10 @@ export default function App() {
     const nextIdx = (currentTrackIndex + 1) % tracks.length;
     selectTrack(nextIdx);
   };
+
+  useEffect(() => {
+    handleNextTrackRef.current = () => { void handleNextTrack(); };
+  });
 
   const handlePrevTrack = () => {
     nextRequestRef.current++;
@@ -2275,6 +2470,38 @@ export default function App() {
     ? nextInPlaylist || (autoRadioEnabled ? rankRelated([...relatedTracks, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List].filter(t => !['jamendo', 'audius', 'itunes'].includes(t.sourceType) && !INITIAL_TRACKS.some(demo => demo.id === t.id && t.sourceType === 'curated') && (!unavailableTrackIds.has(t.id) || isDownloaded(t.id))), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id))[0] : undefined)
     : undefined;
 
+  const automaticUpcoming = prefetchedAutoDjTrack
+    || nextSuggestion
+    || (tracks.length > 1 ? tracks[(currentTrackIndex + 1) % tracks.length] : undefined);
+  const upcomingMusicTrack = nextInPlaylist
+    || (automaticUpcoming && automaticUpcoming.id !== currentMusicTrack.id ? automaticUpcoming : undefined);
+  // Auto-DJ descarga los resultados de YouTube desde Telegram antes de
+  // reproducirlos; una cola explícita sí puede usar /stream_yt directamente.
+  const upcomingNeedsTelegramImport = !nextInPlaylist && !prefetchedAutoDjTrack
+    && !!nextSuggestion && isYouTubeResult(nextSuggestion);
+
+  useEffect(() => {
+    // Una cola explícita se reproduce directo aunque haya una importación
+    // Telegram en curso; solo Auto-DJ depende de que esa importación termine.
+    const waitingForAutoDjImport = backgroundImportBusy && !nextInPlaylist;
+    if (!isPlaying || activeAudioSource !== 'music' || useSynthFallback || waitingForAutoDjImport || !upcomingMusicTrack || upcomingNeedsTelegramImport) {
+      standbyTrackIdRef.current = null;
+      cancelStandbyPrime();
+      return;
+    }
+    if (standbyTrackIdRef.current && standbyTrackIdRef.current !== upcomingMusicTrack.id) {
+      standbyTrackIdRef.current = null;
+      cancelStandbyPrime();
+    }
+    // Precarga con margen: en primer plano no compite con el arranque de la
+    // pista actual; en segundo plano empieza antes para que una pista corta
+    // también tenga la siguiente lista.
+    const delay = document.visibilityState === 'hidden' ? 500 : 3000;
+    const timer = window.setTimeout(() => prepareStandbyTrack(upcomingMusicTrack), delay);
+    return () => window.clearTimeout(timer);
+  }, [isPlaying, activeAudioSource, currentMusicTrack.id, musicSelection, useSynthFallback,
+      backgroundImportBusy, !!nextInPlaylist, upcomingMusicTrack?.id, upcomingMusicTrack?.audioUrl, upcomingNeedsTelegramImport]);
+
   useEffect(() => {
     if (!autoRadioEnabled || activeAudioSource !== 'music' || !isPlaying || !hasSelectedMusicRef.current) return;
     if (!nextSuggestion || !isYouTubeResult(nextSuggestion)) return;
@@ -2296,46 +2523,83 @@ export default function App() {
   }, [autoRadioEnabled, activeAudioSource, isPlaying, currentMusicTrack.id, nextSuggestion?.id,
       telegramImportTarget, backgroundImportBusy, prefetchedAutoDjTrack?.id]);
 
+  const handleDeckWaiting = (deck: 'a' | 'b') => {
+    if (isActiveDeck(deck)) setIsBuffering(true);
+  };
+  const handleDeckPlaying = (deck: 'a' | 'b') => {
+    if (!isActiveDeck(deck)) return;
+    if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+    setIsBuffering(false);
+    const id = playbackTrackRef.current?.id;
+    if (id) setUnavailableTrackIds(previous => { if (!previous.has(id)) return previous; const next = new Set(previous); next.delete(id); return next; });
+  };
+  const handleDeckPause = (deck: 'a' | 'b') => {
+    if (isActiveDeck(deck)) setIsBuffering(false);
+  };
+  const handleDeckTimeUpdate = (deck: 'a' | 'b') => {
+    if (isActiveDeck(deck)) handleTimeUpdate();
+  };
+  const handleDeckLoadedMetadata = (deck: 'a' | 'b', e: React.SyntheticEvent<HTMLAudioElement>) => {
+    if (isActiveDeck(deck) && activeAudioSource === 'music') {
+      setDuration((e.target as HTMLAudioElement).duration || currentMusicTrack.duration);
+    }
+  };
+  const handleDeckError = (deck: 'a' | 'b', e: React.SyntheticEvent<HTMLAudioElement>) => {
+    const err = (e.target as HTMLAudioElement).error;
+    if (!isActiveDeck(deck)) {
+      // El deck de precarga falló; se reintentará cuando toque esa pista.
+      deckUrlsRef.current[deck] = null;
+      standbyTrackIdRef.current = null;
+      cancelStandbyPrime();
+      return;
+    }
+    setIsBuffering(false);
+    console.warn('Music stream event:', err?.code, err?.message);
+    if (activeAudioSource === 'music' && isPlaying && err?.code !== MediaError.MEDIA_ERR_ABORTED) {
+      playbackIntentRef.current.pause();
+      setIsPlaying(false);
+      const track = playbackTrackRef.current;
+      if (track) {
+        setUnavailableTrackIds(previous => new Set(previous).add(track.id));
+        showToast(playbackFailureMessage(track));
+      } else showToast('No se pudo reproducir esta pista. Prueba otra fuente o revisa la conexión.');
+    }
+  };
+  const handleDeckEnded = (deck: 'a' | 'b') => {
+    if (isActiveDeck(deck) && activeAudioSource === 'music') {
+      void handleNextTrack();
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#0b0d10] text-zinc-100 flex flex-col font-sans select-none overflow-x-hidden">
       <TelegramBackgroundImport username={currentUser?.username} apiUrl={fastApiUrl} target={backgroundImportTarget} onFinished={(result) => void handleBackgroundImportFinished(result)} />
-      {/* REPRODUCTOR DEDICADO DE PISTAS DE MÚSICA (SOPORTE COMPLETO DSP, ECUALIZADOR Y 8D) */}
+      {/* DOS DECKS DE MÚSICA: uno suena y el otro precarga la siguiente pista.
+          El intercambio evita el silencio entre canciones que hace que Android
+          Chrome suspenda el JS y retire los controles multimedia. */}
       <audio
-        ref={audioRef}
+        ref={audioDeckARef}
         crossOrigin="anonymous"
-        onWaiting={() => setIsBuffering(true)}
-        onPlaying={() => {
-          if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
-          setIsBuffering(false);
-          const id = playbackTrackRef.current?.id;
-          if (id) setUnavailableTrackIds(previous => { if (!previous.has(id)) return previous; const next = new Set(previous); next.delete(id); return next; });
-        }}
-        onPause={() => setIsBuffering(false)}
-        onTimeUpdate={handleTimeUpdate}
-        onLoadedMetadata={(e) => {
-          if (activeAudioSource === 'music') {
-            setDuration((e.target as HTMLAudioElement).duration || currentMusicTrack.duration);
-          }
-        }}
-        onError={(e) => {
-          const err = (e.target as HTMLAudioElement).error;
-          setIsBuffering(false);
-          console.warn('Music stream event:', err?.code, err?.message);
-          if (activeAudioSource === 'music' && isPlaying && err?.code !== MediaError.MEDIA_ERR_ABORTED) {
-            playbackIntentRef.current.pause();
-            setIsPlaying(false);
-            const track = playbackTrackRef.current;
-            if (track) {
-              setUnavailableTrackIds(previous => new Set(previous).add(track.id));
-              showToast(playbackFailureMessage(track));
-            } else showToast('No se pudo reproducir esta pista. Prueba otra fuente o revisa la conexión.');
-          }
-        }}
-        onEnded={() => {
-          if (activeAudioSource === 'music') {
-            handleNextTrack();
-          }
-        }}
+        preload="auto"
+        onWaiting={() => handleDeckWaiting('a')}
+        onPlaying={() => handleDeckPlaying('a')}
+        onPause={() => handleDeckPause('a')}
+        onTimeUpdate={() => handleDeckTimeUpdate('a')}
+        onLoadedMetadata={(e) => handleDeckLoadedMetadata('a', e)}
+        onError={(e) => handleDeckError('a', e)}
+        onEnded={() => handleDeckEnded('a')}
+      />
+      <audio
+        ref={audioDeckBRef}
+        crossOrigin="anonymous"
+        preload="auto"
+        onWaiting={() => handleDeckWaiting('b')}
+        onPlaying={() => handleDeckPlaying('b')}
+        onPause={() => handleDeckPause('b')}
+        onTimeUpdate={() => handleDeckTimeUpdate('b')}
+        onLoadedMetadata={(e) => handleDeckLoadedMetadata('b', e)}
+        onError={(e) => handleDeckError('b', e)}
+        onEnded={() => handleDeckEnded('b')}
       />
 
       {/* REPRODUCTOR DEDICADO DE RADIO EN VIVO (SIN RESTRICCIONES CORS, CONEXIÓN RESILIENTE 24/7) */}
