@@ -897,6 +897,8 @@ export default function App() {
   const standbyTrackIdRef = useRef<string | null>(null);
   const standbyPrimedRef = useRef(false);
   const primeAttemptRef = useRef(0);
+  const autoSkipRef = useRef({ scheduled: false, count: 0, generation: 0 });
+  const failedPreloadIdsRef = useRef<Set<string>>(new Set());
   const handleNextTrackRef = useRef<() => void>(() => {});
   const audioRef = useMemo(() => ({
     get current(): HTMLAudioElement | null {
@@ -967,6 +969,34 @@ export default function App() {
   const showToast = (msg: string) => {
     setNotification(msg);
     setTimeout(() => setNotification(null), 3800);
+  };
+
+  // Un archivo dañado, borrado o con formato no soportado no debe dejar la
+  // playlist detenida: se marca como no disponible y se salta a la siguiente.
+  const scheduleSkipUnplayable = (track: Track | null | undefined) => {
+    if (!track || autoSkipRef.current.scheduled) return;
+    if (autoSkipRef.current.count >= 3) {
+      playbackIntentRef.current.pause();
+      setIsPlaying(false);
+      setIsBuffering(false);
+      showToast('Varias pistas seguidas no se pudieron reproducir. Revisa la biblioteca o la conexión.');
+      return;
+    }
+    autoSkipRef.current.scheduled = true;
+    autoSkipRef.current.count += 1;
+    const generation = ++autoSkipRef.current.generation;
+    logDiagnostic('auto_skip', {
+      title: track.title,
+      id: track.id,
+      source: track.sourceType,
+      attempt: autoSkipRef.current.count,
+    });
+    showToast(`No se pudo reproducir «${track.title}». Pasando a la siguiente…`);
+    window.setTimeout(() => {
+      if (!autoSkipRef.current.scheduled || autoSkipRef.current.generation !== generation) return;
+      autoSkipRef.current.scheduled = false;
+      handleNextTrackRef.current();
+    }, 900);
   };
 
   useEffect(() => {
@@ -1799,6 +1829,7 @@ export default function App() {
   // servidor: el cambio ocurre en milisegundos y el media session no se pierde.
   const prepareStandbyTrack = (upcoming: Track | null | undefined) => {
     if (!upcoming || activeAudioSource !== 'music' || useSynthFallback) return;
+    if (failedPreloadIdsRef.current.has(upcoming.id)) return;
     if (!playbackIntentRef.current.wants('music')) return;
     const resolved = resolvePlayableMusic(upcoming);
     if (!resolved.ok) return;
@@ -1849,10 +1880,12 @@ export default function App() {
       showToast(track.audioUrl?.startsWith('blob:')
         ? 'El archivo local ya no está disponible. Vuelve a cargarlo o búscalo en la bóveda offline.'
         : 'La canción tardó demasiado en cargar. Revisa el servidor o prueba otra pista.');
+      scheduleSkipUnplayable(track);
     }, timeoutMs);
     audio.play().then(() => {
       if (nextRequestRef.current !== playbackRequest) return;
       if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+      failedPreloadIdsRef.current.delete(track.id);
       setUnavailableTrackIds(previous => { const next = new Set(previous); next.delete(track.id); return next; });
       showToast(`Reproduciendo: ${track.title}`);
     }).catch((err) => {
@@ -1865,6 +1898,7 @@ export default function App() {
       setIsBuffering(false);
       setUnavailableTrackIds(previous => new Set(previous).add(track.id));
       showToast(playbackFailureMessage(sourceTrack));
+      scheduleSkipUnplayable(track);
     });
   };
 
@@ -2095,7 +2129,15 @@ export default function App() {
 
     const queue = playbackQueueRef.current;
     if (queue) {
-      const next = stepPlaybackQueue(queue, 1);
+      let next = stepPlaybackQueue(queue, 1);
+      // Saltar pistas que ya fallaron por formato/archivo dañado. Si hay una
+      // copia offline, se permite reintentarla.
+      while (next) {
+        const candidate = next.tracks[next.index];
+        if (!unavailableTrackIds.has(candidate.id) || isDownloaded(candidate.id)) break;
+        logDiagnostic('queue.skip_unavailable', { title: candidate.title, id: candidate.id });
+        next = stepPlaybackQueue(next, 1);
+      }
       if (next) {
         updatePlaybackQueue(next);
         playSong(next.tracks[next.index], true, true);
@@ -2632,7 +2674,17 @@ export default function App() {
     }
   }[themeAccent];
 
-  const nextInPlaylist = playbackQueue ? stepPlaybackQueue(playbackQueue, 1)?.tracks[playbackQueue.index + 1] : undefined;
+  const nextInPlaylist = (() => {
+    if (!playbackQueue) return undefined;
+    let next = stepPlaybackQueue(playbackQueue, 1);
+    // No precargar ni anunciar pistas que ya fallaron por formato/archivo.
+    while (next) {
+      const candidate = next.tracks[next.index];
+      if (!unavailableTrackIds.has(candidate.id) || isDownloaded(candidate.id)) return candidate;
+      next = stepPlaybackQueue(next, 1);
+    }
+    return undefined;
+  })();
   const nextSuggestion = activeAudioSource === 'music' && hasSelectedMusicRef.current
     ? nextInPlaylist || (autoRadioEnabled ? rankRelated([...relatedTracks, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List].filter(t => !['jamendo', 'audius', 'itunes'].includes(t.sourceType) && !INITIAL_TRACKS.some(demo => demo.id === t.id && t.sourceType === 'curated') && (!unavailableTrackIds.has(t.id) || isDownloaded(t.id))), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id))[0] : undefined)
     : undefined;
@@ -2699,6 +2751,9 @@ export default function App() {
   const handleDeckPlaying = (deck: 'a' | 'b') => {
     if (!isActiveDeck(deck)) return;
     if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+    autoSkipRef.current.scheduled = false;
+    autoSkipRef.current.count = 0;
+    autoSkipRef.current.generation++;
     setIsBuffering(false);
     logDiagnostic('deck.playing', { deck, title: playbackTrackRef.current?.title });
     const id = playbackTrackRef.current?.id;
@@ -2720,8 +2775,24 @@ export default function App() {
     // Al limpiar un deck durante la restauración no hay fuente: no es un fallo.
     if (!element.getAttribute('src')) return;
     const err = element.error;
+    logDiagnostic('deck.error', {
+      deck,
+      active: isActiveDeck(deck),
+      code: err?.code,
+      message: err?.message,
+      title: playbackTrackRef.current?.title,
+      standby: standbyTrackIdRef.current,
+      source: element.currentSrc.split('?')[0].split('/').pop(),
+    });
     if (!isActiveDeck(deck)) {
-      // El deck de precarga falló; se reintentará cuando toque esa pista.
+      // El deck de precarga falló. Un formato no soportado o un archivo dañado
+      // se marca para que la cola lo salte en el cambio de pista.
+      const failedId = standbyTrackIdRef.current;
+      if (failedId && (err?.code === MediaError.MEDIA_ERR_DECODE
+        || err?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED)) {
+        failedPreloadIdsRef.current.add(failedId);
+        setUnavailableTrackIds(previous => new Set(previous).add(failedId));
+      }
       deckUrlsRef.current[deck] = null;
       standbyTrackIdRef.current = null;
       cancelStandbyPrime();
@@ -2729,23 +2800,20 @@ export default function App() {
       return;
     }
     setIsBuffering(false);
-    logDiagnostic('deck.error', {
-      deck,
-      active: isActiveDeck(deck),
-      code: err?.code,
-      message: err?.message,
-      title: playbackTrackRef.current?.title,
-      source: element.currentSrc.split('?')[0].split('/').pop(),
-    });
     console.warn('Music stream event:', err?.code, err?.message);
-    if (activeAudioSource === 'music' && isPlaying && err?.code !== MediaError.MEDIA_ERR_ABORTED) {
+    if (activeAudioSource === 'music'
+      && playbackIntentRef.current.wants('music')
+      && err?.code !== MediaError.MEDIA_ERR_ABORTED) {
       playbackIntentRef.current.pause();
       setIsPlaying(false);
       const track = playbackTrackRef.current;
       if (track) {
         setUnavailableTrackIds(previous => new Set(previous).add(track.id));
         showToast(playbackFailureMessage(track));
-      } else showToast('No se pudo reproducir esta pista. Prueba otra fuente o revisa la conexión.');
+        scheduleSkipUnplayable(track);
+      } else {
+        showToast('No se pudo reproducir esta pista. Prueba otra fuente o revisa la conexión.');
+      }
     }
   };
   const handleDeckEnded = (deck: 'a' | 'b') => {
