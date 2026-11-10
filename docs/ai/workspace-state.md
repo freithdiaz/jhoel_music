@@ -1,6 +1,6 @@
 # Workspace state
 
-- TASK activa para esta sesión: `docs/tasks/TASK-0002.md` (IN PROGRESS; decks A/B con precarga, cambio de pista, audio directo en móvil para evitar el corte de Web Audio en segundo plano, cola persistente y service worker v8; build y 55 pruebas JS en verde; prueba física Android/Bluetooth pendiente). `docs/tasks/TASK-0001.md` permanece IN PROGRESS con trabajo previo independiente.
+- TASK activa para esta sesión: `docs/tasks/TASK-0002.md` (IN PROGRESS; decks A/B con precarga y liberación del deck anterior, audio directo en móvil, cola persistente, diagnóstico copiable, ErrorBoundary y service worker v10; build y 55 pruebas JS en verde; el usuario reportó cierre completo de la app tras 2 canciones y falta capturar el diagnóstico/la causa Android). `docs/tasks/TASK-0001.md` permanece IN PROGRESS con trabajo previo independiente.
 - **Versión inicial validada por el usuario:** `v1.0.0-inicial` (2026-11-08). Documentación en `docs/releases/v1.0.0-inicial.md`.
 - Funciona: búsqueda YouTube 10/50, importación automática desde Telegram, conversión M4A→MP3, autoplay al publicar, Bóveda, playlists, borrado confirmado, AutoDJ con descarga anticipada y sugerencias.
 - Despliegue Linux preparado en `deploy/linux/` (guía, compose, Caddy, systemd, backups, preflight, env de ejemplo). El puente soporta Linux con sesión 0600, `flock`, URL configurable y credenciales por entorno.

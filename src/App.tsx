@@ -54,6 +54,7 @@ import { playbackUrl } from './services/playbackUrl';
 import { playbackFailureMessage, trackSourceLabel } from './services/musicSources';
 import { createPlaybackQueue, stepPlaybackQueue, PlaybackQueue } from './services/playbackQueue';
 import { AudioDeck, standbyDeck as selectStandbyDeck, canReusePreloadedDeck, shouldPrimeStandby } from './services/audioDeck';
+import { clearDiagnostics, diagnosticsText, logDiagnostic, readDiagnostics } from './services/diagnostics';
 import { resolveSpotifyTrackViaRea } from './services/reaBridge';
 import {
   getStoredJamendoClientId,
@@ -342,6 +343,9 @@ export default function App() {
   const updatePlaybackQueue = (queue: PlaybackQueue | null) => {
     playbackQueueRef.current = queue;
     setPlaybackQueue(queue);
+    logDiagnostic('queue.update', queue
+      ? { name: queue.name, index: queue.index, total: queue.tracks.length, title: queue.tracks[queue.index]?.title }
+      : 'ninguna');
   };
   const playbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
@@ -368,6 +372,8 @@ export default function App() {
   });
   const [isMobileNowPlayingOpen, setIsMobileNowPlayingOpen] = useState(false);
   const [isThemeModalOpen, setIsThemeModalOpen] = useState(false);
+  const [isDiagnosticsOpen, setIsDiagnosticsOpen] = useState(false);
+  const [diagnosticsSnapshot, setDiagnosticsSnapshot] = useState('');
 
   // Persistir tema seleccionado permanentemente en el navegador
   useEffect(() => {
@@ -536,6 +542,7 @@ export default function App() {
     setDuration(current.duration || 0);
     setCurrentTime(0);
     setIsPlaying(false);
+    logDiagnostic('playback.restore', { name: queue.name, index, total: queue.tracks.length, title: current.title });
   }, [playbackStateKey]);
 
   useEffect(() => {
@@ -931,6 +938,7 @@ export default function App() {
     if (!standbyPrimedRef.current) return;
     standbyPrimedRef.current = false;
     primeAttemptRef.current++;
+    logDiagnostic('prime.cancel', { deck: standbyDeck() });
     const deck = standbyDeck();
     const element = deckElement(deck);
     if (element) {
@@ -939,6 +947,21 @@ export default function App() {
       try { element.currentTime = 0; } catch {}
     }
     setDeckGain(deck, 1);
+  };
+
+  // Libera el deck inactivo: en Android dos decodificadores cargados durante
+  // toda la canción pueden terminar cerrando la app por falta de recursos.
+  const releaseDeck = (deck: AudioDeck) => {
+    const element = deckElement(deck);
+    if (!element || isActiveDeck(deck)) return;
+    try {
+      element.pause();
+      element.removeAttribute('src');
+      element.load();
+    } catch {}
+    deckUrlsRef.current[deck] = null;
+    standbyTrackIdRef.current = null;
+    standbyPrimedRef.current = false;
   };
 
   const showToast = (msg: string) => {
@@ -1499,6 +1522,7 @@ export default function App() {
     }
     nextRequestRef.current++;
     playbackIntentRef.current.pause();
+    logDiagnostic('playback.pause', { source: activeAudioSource });
     if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
     cancelStandbyPrime();
     if (activeAudioSource === 'radio') radioAudioRef.current?.pause();
@@ -1525,6 +1549,7 @@ export default function App() {
     }
     nextRequestRef.current++;
     const ticket = playbackIntentRef.current.play(source);
+    logDiagnostic('playback.resume', { source, title: currentMusicTrack.title });
     if (source === 'music' && useSynthFallback) {
       setIsPlaying(true);
       return;
@@ -1557,11 +1582,12 @@ export default function App() {
     audio.play().then(() => {
       if (playbackIntentRef.current.isCurrent(ticket, source)) setIsPlaying(true);
       else if (!playbackIntentRef.current.wants(source)) audio.pause();
-    }).catch(() => {
+    }).catch((error) => {
       if (!playbackIntentRef.current.isCurrent(ticket, source)) return;
       playbackIntentRef.current.pause();
       setIsPlaying(false);
       setIsBuffering(false);
+      logDiagnostic('playback.resume_error', { source, message: error?.message });
       showToast(source === 'radio' ? 'No se pudo reanudar la emisora. Prueba de nuevo.' : 'No se pudo reanudar esta canción.');
     });
   };
@@ -1797,6 +1823,7 @@ export default function App() {
       element.load();
       deckUrlsRef.current[deck] = normalized;
       standbyTrackIdRef.current = upcoming.id;
+      logDiagnostic('preload', { deck, title: upcoming.title, id: upcoming.id });
     } catch (error) {
       deckUrlsRef.current[deck] = null;
       standbyTrackIdRef.current = null;
@@ -1813,6 +1840,7 @@ export default function App() {
   ) => {
     playbackTimeoutRef.current = setTimeout(() => {
       if (nextRequestRef.current !== playbackRequest || audio.readyState >= 3) return;
+      logDiagnostic('play.timeout', { title: track.title, ready: audio.readyState, network: navigator.onLine });
       playbackIntentRef.current.pause();
       audio.pause();
       setIsPlaying(false);
@@ -1830,6 +1858,7 @@ export default function App() {
     }).catch((err) => {
       if (nextRequestRef.current !== playbackRequest || err?.name === 'AbortError') return;
       if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+      logDiagnostic('play.error', { title: track.title, name: err?.name, message: err?.message });
       console.warn('No se pudo reproducir la pista:', err);
       playbackIntentRef.current.pause();
       setIsPlaying(false);
@@ -1863,6 +1892,13 @@ export default function App() {
     const normalizedUrl = normalizeAudioUrl(resolvedUrl);
     const canReuseStandby = !!candidateAudio
       && canReusePreloadedDeck(deckUrlsRef.current[candidateDeck], normalizedUrl, candidateAudio.readyState, !!candidateAudio.error);
+    logDiagnostic('track.play', {
+      title: track.title,
+      id: track.id,
+      source: sourceTrack.sourceType,
+      via: canReuseStandby ? `preloaded-${candidateDeck}` : `load-${activeDeckRef.current}`,
+      queue: playbackQueueRef.current ? `${playbackQueueRef.current.index + 1}/${playbackQueueRef.current.tracks.length}` : 'none',
+    });
     // Reannounce the next track before replacing the ended media element.
     // Android/Chrome may retire the previous Media Session at the track boundary.
     updateMediaSessionMetadata(sourceTrack);
@@ -1907,6 +1943,7 @@ export default function App() {
     if (!IS_MOBILE_AUDIO) initWebAudio();
 
     if (canReuseStandby && candidateAudio) {
+      const previousDeck = activeDeckRef.current;
       const previousAudio = audioRef.current;
       activeDeckRef.current = candidateDeck;
       standbyPrimedRef.current = false;
@@ -1922,13 +1959,20 @@ export default function App() {
       } else {
         setDuration(track.duration || sourceTrack.duration || 0);
       }
+      logDiagnostic('deck.promote', { deck: candidateDeck, title: track.title });
       startMusicPlayback(candidateAudio, playbackRequest, track, sourceTrack, 12000);
+      // El deck anterior ya no se necesita para esta pista: liberarlo reduce
+      // decodificadores y memoria en Android.
+      releaseDeck(previousDeck);
       return;
     }
 
     cancelStandbyPrime();
+    // Si el deck de precarga no era la pista pedida, liberarlo también.
+    releaseDeck(candidateDeck);
     const activeAudio = audioRef.current;
     if (activeAudio) {
+      logDiagnostic('deck.load', { deck: activeDeckRef.current, title: track.title });
       activeAudio.src = resolvedUrl;
       activeAudio.load();
       startMusicPlayback(activeAudio, playbackRequest, track, sourceTrack, 25000);
@@ -1974,6 +2018,7 @@ export default function App() {
       standby.paused
     )) {
       const attempt = ++primeAttemptRef.current;
+      logDiagnostic('prime.start', { deck: standbyDeckId, title: upcomingMusicTrack?.title });
       try {
         standby.currentTime = 0;
         standby.volume = 0.0001;
@@ -2040,6 +2085,7 @@ export default function App() {
 
   const handleNextTrack = async () => {
     const requestId = ++nextRequestRef.current;
+    logDiagnostic('next', { source: activeAudioSource, title: currentMusicTrack.title });
     if (activeAudioSource === 'radio') {
       const currentIdx = radioStations.findIndex((s) => s.id === currentRadioStation.id);
       const nextIdx = (currentIdx + 1) % radioStations.length;
@@ -2350,6 +2396,7 @@ export default function App() {
             lyrics: [{ time: 0, text: `♪ Streaming desde ${fastApiUrl} ♪` }]
           }));
           importedTracks = imported;
+          logDiagnostic('library.load', { count: imported.length });
           setTracks((prev) => {
             const currentId = playbackTrackRef.current?.id;
             const next = [...imported, ...prev.filter(track => !imported.some(item => item.id === track.id))];
@@ -2608,16 +2655,21 @@ export default function App() {
     if (!isPlaying || activeAudioSource !== 'music' || useSynthFallback || waitingForAutoDjImport || !upcomingMusicTrack || upcomingNeedsTelegramImport) {
       standbyTrackIdRef.current = null;
       cancelStandbyPrime();
+      releaseDeck(standbyDeck());
       return;
     }
     if (standbyTrackIdRef.current && standbyTrackIdRef.current !== upcomingMusicTrack.id) {
       standbyTrackIdRef.current = null;
       cancelStandbyPrime();
+      releaseDeck(standbyDeck());
     }
   }, [isPlaying, activeAudioSource, currentMusicTrack.id, musicSelection, useSynthFallback,
       backgroundImportBusy, !!nextInPlaylist, upcomingMusicTrack?.id, upcomingNeedsTelegramImport]);
 
   useEffect(() => {
+    // Una siguiente pista de una cola explícita ya se reproduce con /stream_yt;
+    // no hace falta descargarla también desde Telegram en segundo plano.
+    if (nextInPlaylist) return;
     if (!autoRadioEnabled || activeAudioSource !== 'music' || !isPlaying || !hasSelectedMusicRef.current) return;
     if (!nextSuggestion || !isYouTubeResult(nextSuggestion)) return;
     if (telegramImportTarget || backgroundImportBusy || prefetchedAutoDjTrack) return;
@@ -2636,15 +2688,19 @@ export default function App() {
     }, 6000);
     return () => window.clearTimeout(timer);
   }, [autoRadioEnabled, activeAudioSource, isPlaying, currentMusicTrack.id, nextSuggestion?.id,
-      telegramImportTarget, backgroundImportBusy, prefetchedAutoDjTrack?.id]);
+      !!nextInPlaylist, telegramImportTarget, backgroundImportBusy, prefetchedAutoDjTrack?.id]);
 
   const handleDeckWaiting = (deck: 'a' | 'b') => {
-    if (isActiveDeck(deck)) setIsBuffering(true);
+    if (isActiveDeck(deck)) {
+      if (!isBuffering) logDiagnostic('deck.waiting', { deck, title: playbackTrackRef.current?.title });
+      setIsBuffering(true);
+    }
   };
   const handleDeckPlaying = (deck: 'a' | 'b') => {
     if (!isActiveDeck(deck)) return;
     if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
     setIsBuffering(false);
+    logDiagnostic('deck.playing', { deck, title: playbackTrackRef.current?.title });
     const id = playbackTrackRef.current?.id;
     if (id) setUnavailableTrackIds(previous => { if (!previous.has(id)) return previous; const next = new Set(previous); next.delete(id); return next; });
   };
@@ -2669,9 +2725,18 @@ export default function App() {
       deckUrlsRef.current[deck] = null;
       standbyTrackIdRef.current = null;
       cancelStandbyPrime();
+      releaseDeck(deck);
       return;
     }
     setIsBuffering(false);
+    logDiagnostic('deck.error', {
+      deck,
+      active: isActiveDeck(deck),
+      code: err?.code,
+      message: err?.message,
+      title: playbackTrackRef.current?.title,
+      source: element.currentSrc.split('?')[0].split('/').pop(),
+    });
     console.warn('Music stream event:', err?.code, err?.message);
     if (activeAudioSource === 'music' && isPlaying && err?.code !== MediaError.MEDIA_ERR_ABORTED) {
       playbackIntentRef.current.pause();
@@ -2685,8 +2750,39 @@ export default function App() {
   };
   const handleDeckEnded = (deck: 'a' | 'b') => {
     if (isActiveDeck(deck) && activeAudioSource === 'music') {
+      logDiagnostic('deck.ended', { deck, title: playbackTrackRef.current?.title });
       void handleNextTrack();
     }
+  };
+
+  const describeAudio = (element: HTMLAudioElement | null, label: string) => {
+    if (!element) return `${label}: sin elemento`;
+    const source = element.currentSrc || element.getAttribute('src') || '';
+    let name = 'sin fuente';
+    try { name = decodeURIComponent(source.split('?')[0].split('/').pop() || 'sin fuente'); } catch {}
+    return `${label}: ${name} paused=${element.paused} ended=${element.ended} ct=${element.currentTime.toFixed(1)} ready=${element.readyState} err=${element.error?.code ?? '-'} vol=${element.volume}`;
+  };
+
+  const openDiagnostics = () => {
+    const queue = playbackQueueRef.current;
+    const lines = [
+      `Fecha: ${new Date().toISOString()}`,
+      `UA: ${navigator.userAgent}`,
+      `Online: ${navigator.onLine}  Visibility: ${document.visibilityState}`,
+      `ServiceWorker: ${navigator.serviceWorker?.controller ? 'controlado' : 'no controlado'}`,
+      `Pantalla: ${window.innerWidth}x${window.innerHeight} DPR ${window.devicePixelRatio}`,
+      `Dispositivo: ${(navigator as any).deviceMemory ?? '?'} GB RAM · ${navigator.hardwareConcurrency ?? '?'} CPU`,
+      `Queue: ${queue ? `${queue.name} ${queue.index + 1}/${queue.tracks.length} · ${queue.tracks[queue.index]?.title}` : 'ninguna'}`,
+      describeAudio(audioDeckARef.current, 'Deck A'),
+      describeAudio(audioDeckBRef.current, 'Deck B'),
+      describeAudio(radioAudioRef.current, 'Radio'),
+      `AudioContext: ${audioCtxRef.current ? audioCtxRef.current.state : 'no inicializado'}`,
+      '',
+      diagnosticsText(),
+    ];
+    setDiagnosticsSnapshot(lines.join('\n'));
+    setIsDiagnosticsOpen(true);
+    logDiagnostic('diagnostics.open');
   };
 
   return (
@@ -2888,6 +2984,16 @@ export default function App() {
             <span>Subir MP3</span>
             <input type="file" accept="audio/*" multiple onChange={handleLocalFileUpload} className="hidden" />
           </label>
+
+          <button
+            type="button"
+            onClick={openDiagnostics}
+            className="p-2 rounded-xl bg-zinc-900 border border-zinc-700/80 text-zinc-300 hover:text-white shadow"
+            title="Diagnóstico de reproducción"
+            aria-label="Abrir diagnóstico de reproducción"
+          >
+            <Activity className="w-4 h-4" />
+          </button>
 
           {/* Selector de tema en Desktop (5 esferas inline) */}
           <div className="hidden md:flex items-center bg-zinc-900 border border-zinc-800 rounded-full p-1 gap-1.5 shadow-inner">
@@ -5803,6 +5909,53 @@ export default function App() {
                 className="text-zinc-300 hover:text-white font-medium hover:underline"
               >
                 Seguir como Invitado →
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isDiagnosticsOpen && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/75 p-4" onClick={() => setIsDiagnosticsOpen(false)}>
+          <div
+            className="w-full max-w-2xl max-h-[88vh] overflow-hidden rounded-2xl border border-zinc-700 bg-[#11131C] p-4 shadow-2xl space-y-3"
+            onClick={event => event.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <h3 className="text-sm font-bold text-white">Diagnóstico de reproducción</h3>
+                <p className="text-[11px] text-zinc-400">Este registro queda guardado aunque la app se cierre.</p>
+              </div>
+              <button type="button" onClick={() => setIsDiagnosticsOpen(false)} aria-label="Cerrar diagnóstico"
+                className="p-2 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <pre className="max-h-[60vh] overflow-auto whitespace-pre-wrap rounded-xl bg-black/50 p-3 text-[10px] leading-relaxed text-zinc-300 select-text">
+              {diagnosticsSnapshot}
+            </pre>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  void navigator.clipboard?.writeText(diagnosticsSnapshot)
+                    .then(() => showToast('Diagnóstico copiado'))
+                    .catch(() => showToast('No se pudo copiar; selecciona el texto manualmente'));
+                }}
+                className="min-h-10 rounded-lg bg-emerald-400 px-4 text-xs font-bold text-black"
+              >
+                Copiar diagnóstico
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  clearDiagnostics();
+                  setDiagnosticsSnapshot('');
+                  showToast('Diagnóstico borrado');
+                }}
+                className="min-h-10 rounded-lg border border-zinc-600 px-4 text-xs text-zinc-300"
+              >
+                Borrar registro
               </button>
             </div>
           </div>
