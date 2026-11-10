@@ -1,6 +1,6 @@
 // Solo el código de la app se guarda aquí. El audio descargado vive en IndexedDB.
-const CACHE_NAME = 'diaz-music-cache-v11';
-const STATIC_ASSETS = ['/', '/index.html', '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/icon-512-maskable.png'];
+const CACHE_NAME = 'diaz-music-cache-v13';
+const STATIC_ASSETS = ['/', '/index.html', '/manifest.webmanifest', '/keepalive.wav', '/icons/icon.svg', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/icon-512-maskable.png'];
 
 self.addEventListener('install', event => {
   event.waitUntil((async () => {

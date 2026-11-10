@@ -1177,7 +1177,11 @@ def send_partial_file(request: Request, path: Path):
             with open(path, "rb") as f:
                 yield from f
         content_type, _ = mimetypes.guess_type(path)
-        return StreamingResponse(full_iter(), media_type=content_type or "audio/mpeg")
+        return StreamingResponse(
+            full_iter(),
+            media_type=content_type or "audio/mpeg",
+            headers={"Accept-Ranges": "bytes"},
+        )
 
     try:
         bytes_prefix = range_header.replace("bytes=", "")

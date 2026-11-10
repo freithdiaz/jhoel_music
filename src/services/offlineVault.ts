@@ -6,11 +6,54 @@ const TRACKS_STORE = 'saved_tracks';
 const BLOBS_STORE = 'audio_blobs';
 const MAX_AUDIO_BYTES = 100 * 1024 * 1024;
 const objectUrls = new Map<string, string>();
+// Una URL de objeto en uso por el audio actual o el deck de precarga no debe
+// revocarse: el elemento quedaría mudo hasta el siguiente cambio de pista.
+const protectedObjectUrls = new Set<string>();
 
 function getObjectUrl(id: string, blob: Blob): string {
   let url = objectUrls.get(id);
   if (!url) { url = URL.createObjectURL(blob); objectUrls.set(id, url); }
   return url;
+}
+
+function replaceObjectUrl(id: string, blob: Blob): string {
+  const previous = objectUrls.get(id);
+  if (previous && !protectedObjectUrls.has(id)) {
+    try { URL.revokeObjectURL(previous); } catch {}
+  }
+  const url = URL.createObjectURL(blob);
+  objectUrls.set(id, url);
+  return url;
+}
+
+export function protectOfflineTrackUrl(id: string, protectedValue = true): void {
+  if (protectedValue) protectedObjectUrls.add(id);
+  else protectedObjectUrls.delete(id);
+}
+
+export function getOfflineTrackUrl(id: string): string | null {
+  return objectUrls.get(id) || null;
+}
+
+/** Regenera una URL de objeto desde IndexedDB sin tocar la que esté en uso. */
+export async function refreshOfflineTrackUrl(id: string): Promise<string | null> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(BLOBS_STORE, 'readonly');
+    const request = tx.objectStore(BLOBS_STORE).get(id);
+    request.onsuccess = () => {
+      const blob = request.result?.blob;
+      if (!(blob instanceof Blob) || !blob.size) {
+        db.close();
+        resolve(null);
+        return;
+      }
+      const url = replaceObjectUrl(id, blob);
+      db.close();
+      resolve(url);
+    };
+    request.onerror = () => { db.close(); reject(request.error); };
+  });
 }
 
 function openDB(): Promise<IDBDatabase> {
@@ -75,7 +118,7 @@ export async function saveTrackOffline(track: Track): Promise<Track> {
     tracksStore.put({ ...track, cachedOffline: true });
     blobsStore.put({ id: track.id, blob: audioBlob });
 
-    tx.oncomplete = () => { db.close(); resolve({ ...track, cachedOffline: true, audioUrl: getObjectUrl(track.id, audioBlob) }); };
+    tx.oncomplete = () => { db.close(); resolve({ ...track, cachedOffline: true, audioUrl: replaceObjectUrl(track.id, audioBlob) }); };
     tx.onerror = () => { db.close(); reject(tx.error); };
     tx.onabort = () => { db.close(); reject(tx.error || new Error('No se pudo guardar la canción.')); };
   });
@@ -87,7 +130,15 @@ export async function removeTrackOffline(trackId: string): Promise<void> {
     const tx = db.transaction([TRACKS_STORE, BLOBS_STORE], 'readwrite');
     tx.objectStore(TRACKS_STORE).delete(trackId);
     tx.objectStore(BLOBS_STORE).delete(trackId);
-    tx.oncomplete = () => { db.close(); const url = objectUrls.get(trackId); if (url) URL.revokeObjectURL(url); objectUrls.delete(trackId); resolve(); };
+    tx.oncomplete = () => {
+      db.close();
+      if (!protectedObjectUrls.has(trackId)) {
+        const url = objectUrls.get(trackId);
+        if (url) { try { URL.revokeObjectURL(url); } catch {} objectUrls.delete(trackId); }
+      }
+      protectedObjectUrls.delete(trackId);
+      resolve();
+    };
     tx.onerror = () => { db.close(); reject(tx.error); };
     tx.onabort = () => { db.close(); reject(tx.error || new Error('No se pudo eliminar la canción.')); };
   });

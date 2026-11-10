@@ -1,6 +1,6 @@
 # Workspace state
 
-- TASK activa para esta sesión: `docs/tasks/TASK-0002.md` (IN PROGRESS; decks A/B con precarga y liberación del deck anterior, audio directo en móvil, cola persistente, diagnóstico copiable, ErrorBoundary, salto automático de archivos dañados y service worker v11; build y 55 pruebas JS en verde. El diagnóstico del usuario demostró que la app no se cerró: el reproductor se detuvo en un MP3 de Telegram con formato inválido; ya se salta solo. `docs/tasks/TASK-0001.md` permanece IN PROGRESS con trabajo previo independiente.
+- TASK activa para esta sesión: `docs/tasks/TASK-0002.md` (IN PROGRESS; decks A/B persistentes con precarga y liberación, audio directo en móvil sin Web Audio, persistencia de cola/pista/posición cada 2 s, keep-alive silencioso 15 min, recuperación de URL/Blob al reanudar, MediaSession/WakeLock, protección de ObjectURL, salto de archivos dañados y service worker v13; build y 57 pruebas JS en verde). `docs/tasks/TASK-0001.md` permanece IN PROGRESS con trabajo previo independiente.
 - **Versión inicial validada por el usuario:** `v1.0.0-inicial` (2026-11-08). Documentación en `docs/releases/v1.0.0-inicial.md`.
 - Funciona: búsqueda YouTube 10/50, importación automática desde Telegram, conversión M4A→MP3, autoplay al publicar, Bóveda, playlists, borrado confirmado, AutoDJ con descarga anticipada y sugerencias.
 - Despliegue Linux preparado en `deploy/linux/` (guía, compose, Caddy, systemd, backups, preflight, env de ejemplo). El puente soporta Linux con sesión 0600, `flock`, URL configurable y credenciales por entorno.

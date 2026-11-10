@@ -41,12 +41,15 @@ import {
   releaseScreenWakeLock
 } from './services/mediaSession';
 import { createPlaybackIntent } from './services/playbackIntent';
-import { watchAudioContextRecovery } from './services/audioContextRecovery';
+import { resumeAudioContextIfNeeded, watchAudioContextRecovery } from './services/audioContextRecovery';
 import {
   saveTrackOffline,
   removeTrackOffline,
   getAllOfflineTracks,
-  exportDrmFreeFile
+  exportDrmFreeFile,
+  getOfflineTrackUrl,
+  refreshOfflineTrackUrl,
+  protectOfflineTrackUrl
 } from './services/offlineVault';
 import { searchFreeMusicOnline, fetchSearchSuggestions } from './services/freeMusicApi';
 import { rankRelated, recommendationQuery, relatedReason, trackGenre } from './services/recommendations';
@@ -350,6 +353,10 @@ export default function App() {
   const playbackTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(172);
+  const isPlayingRef = useRef(isPlaying);
+  const currentTimeRef = useRef(currentTime);
+  isPlayingRef.current = isPlaying;
+  currentTimeRef.current = currentTime;
   const [volume, setVolume] = useState(0.85);
   const [isMuted, setIsMuted] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -496,23 +503,28 @@ export default function App() {
   const restoredPlaybackKeyRef = useRef('');
   const skipPlaybackPersistRef = useRef(false);
   const pendingRestoreTrackIdRef = useRef<string | null>(null);
+  const pendingSeekRef = useRef(0);
+  const lastPlaybackPersistRef = useRef(0);
 
   useEffect(() => {
     if (restoredPlaybackKeyRef.current === playbackStateKey) return;
     restoredPlaybackKeyRef.current = playbackStateKey;
     let saved: any = null;
     try { saved = JSON.parse(localStorage.getItem(playbackStateKey) || 'null'); } catch { saved = null; }
-    if (!saved || !Array.isArray(saved.tracks) || !saved.tracks.length) return;
-    const restoredTracks = saved.tracks.filter((item: unknown): item is Track =>
+    if (!saved) return;
+    const savedQueue = saved.queue && Array.isArray(saved.queue.tracks) ? saved.queue : saved;
+    if (!Array.isArray(savedQueue.tracks) || !savedQueue.tracks.length) return;
+    const restoredTracks = savedQueue.tracks.filter((item: unknown): item is Track =>
       !!item && typeof item === 'object'
       && typeof (item as Track).id === 'string'
       && typeof (item as Track).audioUrl === 'string');
     if (!restoredTracks.length) return;
-    const index = Number.isInteger(saved.index)
-      ? Math.min(Math.max(saved.index, 0), restoredTracks.length - 1) : 0;
+    const index = Number.isInteger(savedQueue.index)
+      ? Math.min(Math.max(savedQueue.index, 0), restoredTracks.length - 1) : 0;
     const current = restoredTracks[index];
+    const savedTime = Number.isFinite(saved.currentTime) ? Math.max(0, saved.currentTime) : 0;
     const queue: PlaybackQueue = {
-      name: typeof saved.name === 'string' && saved.name ? saved.name : 'Playlist',
+      name: typeof savedQueue.name === 'string' && savedQueue.name ? savedQueue.name : 'Playlist',
       tracks: restoredTracks,
       index,
     };
@@ -540,9 +552,10 @@ export default function App() {
     hasSelectedMusicRef.current = true;
     setMusicSelection(value => value || 1);
     setDuration(current.duration || 0);
-    setCurrentTime(0);
+    setCurrentTime(savedTime);
+    pendingSeekRef.current = savedTime;
     setIsPlaying(false);
-    logDiagnostic('playback.restore', { name: queue.name, index, total: queue.tracks.length, title: current.title });
+    logDiagnostic('playback.restore', { name: queue.name, index, total: queue.tracks.length, title: current.title, currentTime: savedTime });
   }, [playbackStateKey]);
 
   useEffect(() => {
@@ -553,20 +566,6 @@ export default function App() {
     pendingRestoreTrackIdRef.current = null;
     setCurrentTrackIndex(index);
   }, [tracks]);
-
-  useEffect(() => {
-    if (skipPlaybackPersistRef.current) {
-      skipPlaybackPersistRef.current = false;
-      return;
-    }
-    try {
-      if (playbackQueue && playbackQueue.tracks.length) {
-        localStorage.setItem(playbackStateKey, JSON.stringify(playbackQueue));
-      } else {
-        localStorage.removeItem(playbackStateKey);
-      }
-    } catch {}
-  }, [playbackQueue, playbackStateKey]);
 
   // Guardar datos del usuario activo en cada cambio
   useEffect(() => {
@@ -828,6 +827,7 @@ export default function App() {
   // Sintonizar emisora de radio con 0 cortes (Sin mezclar con la lista de canciones)
   const playRadioStation = (station: Track) => {
     const ticket = playbackIntentRef.current.play('radio');
+    stopKeepAlive();
     cancelStandbyPrime();
     updatePlaybackQueue(null);
     nextRequestRef.current++;
@@ -846,9 +846,7 @@ export default function App() {
       audioRef.current.pause();
     }
 
-    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-      audioCtxRef.current.resume().catch(console.warn);
-    }
+    resumeAudioContextIfNeeded(audioCtxRef.current, () => true);
 
     // El stream de radio usa el reproductor nativo radioAudioRef sin restricciones CORS
     if (radioAudioRef.current) {
@@ -899,6 +897,9 @@ export default function App() {
   const primeAttemptRef = useRef(0);
   const autoSkipRef = useRef({ scheduled: false, count: 0, generation: 0 });
   const failedPreloadIdsRef = useRef<Set<string>>(new Set());
+  const recoveryAttemptsRef = useRef(0);
+  const recoveryInFlightRef = useRef(false);
+  const stallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleNextTrackRef = useRef<() => void>(() => {});
   const audioRef = useMemo(() => ({
     get current(): HTMLAudioElement | null {
@@ -906,6 +907,8 @@ export default function App() {
     }
   }), []);
   const radioAudioRef = useRef<HTMLAudioElement | null>(null);
+  const keepAliveAudioRef = useRef<HTMLAudioElement | null>(null);
+  const keepAliveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const eqNodesRef = useRef<BiquadFilterNode[]>([]);
@@ -971,6 +974,63 @@ export default function App() {
     setTimeout(() => setNotification(null), 3800);
   };
 
+  // Guarda cola, pista, posición y estado. Se llama como máximo cada 2 s
+  // durante la reproducción y de inmediato al pausar/cambiar de pista.
+  const persistPlaybackSnapshot = (force = false, playingOverride?: boolean, positionOverride?: number) => {
+    const now = Date.now();
+    if (!force && now - lastPlaybackPersistRef.current < 2000) return;
+    lastPlaybackPersistRef.current = now;
+    const queue = playbackQueueRef.current;
+    const track = playbackTrackRef.current;
+    if (!track || !hasSelectedMusicRef.current) {
+      try { localStorage.removeItem(playbackStateKey); } catch {}
+      return;
+    }
+    const effectiveQueue: PlaybackQueue = queue && queue.tracks.length
+      ? queue
+      : { name: 'Última reproducción', tracks: [track], index: 0 };
+    const active = audioRef.current;
+    const hasLoadedSource = !!active?.getAttribute('src');
+    const position = positionOverride
+      ?? (active && hasLoadedSource && Number.isFinite(active.currentTime)
+        ? active.currentTime
+        : (pendingSeekRef.current || currentTimeRef.current));
+    const snapshot = {
+      version: 2,
+      queue: effectiveQueue,
+      trackId: track.id,
+      currentTime: Math.max(0, position),
+      isPlaying: playingOverride ?? isPlayingRef.current,
+      updatedAt: now,
+    };
+    try { localStorage.setItem(playbackStateKey, JSON.stringify(snapshot)); } catch {}
+  };
+
+  // Bucle silencioso de 1 s: mantiene viva la sesión multimedia mientras el
+  // usuario tiene la música pausada en móvil. Se detiene a los 15 minutos.
+  const stopKeepAlive = () => {
+    if (keepAliveTimerRef.current) {
+      clearTimeout(keepAliveTimerRef.current);
+      keepAliveTimerRef.current = null;
+    }
+    const element = keepAliveAudioRef.current;
+    if (element) {
+      element.pause();
+      try { element.currentTime = 0; } catch {}
+    }
+  };
+
+  const startKeepAlive = () => {
+    if (!IS_MOBILE_AUDIO) return;
+    const element = keepAliveAudioRef.current;
+    if (!element) return;
+    element.volume = 0.0001;
+    void element.play().catch(() => {});
+    if (keepAliveTimerRef.current) clearTimeout(keepAliveTimerRef.current);
+    keepAliveTimerRef.current = setTimeout(stopKeepAlive, 15 * 60 * 1000);
+    logDiagnostic('keepalive.start');
+  };
+
   // Un archivo dañado, borrado o con formato no soportado no debe dejar la
   // playlist detenida: se marca como no disponible y se salta a la siguiente.
   const scheduleSkipUnplayable = (track: Track | null | undefined) => {
@@ -998,6 +1058,27 @@ export default function App() {
       handleNextTrackRef.current();
     }, 900);
   };
+
+  useEffect(() => {
+    if (skipPlaybackPersistRef.current) {
+      skipPlaybackPersistRef.current = false;
+      return;
+    }
+    persistPlaybackSnapshot(true);
+  }, [playbackQueue, playbackStateKey]);
+
+  useEffect(() => {
+    const save = () => persistPlaybackSnapshot(true);
+    const onVisibility = () => { if (document.visibilityState === 'hidden') save(); };
+    window.addEventListener('pagehide', save);
+    window.addEventListener('beforeunload', save);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', save);
+      window.removeEventListener('beforeunload', save);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [playbackStateKey]);
 
   useEffect(() => {
     const update = () => setIsOnline(navigator.onLine);
@@ -1274,7 +1355,7 @@ export default function App() {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       const ctx = new AudioCtx();
       audioCtxRef.current = ctx;
-      if (ctx.state === 'suspended') ctx.resume().catch(console.warn);
+      resumeAudioContextIfNeeded(ctx, () => true);
       watchAudioContextRecovery(
         ctx,
         () => playbackIntentRef.current.wants('music'),
@@ -1513,9 +1594,10 @@ export default function App() {
     const handleVisibilityResume = () => {
       if (document.visibilityState === 'visible') {
         cancelStandbyPrime();
-        if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-          audioCtxRef.current.resume().catch(console.warn);
-        }
+        resumeAudioContextIfNeeded(
+          audioCtxRef.current,
+          () => isPlaying && playbackIntentRef.current.wants(activeAudioSource),
+        );
         if (activeAudioSource === 'music' && audioRef.current?.ended) {
           handleNextTrackRef.current();
           return;
@@ -1534,6 +1616,10 @@ export default function App() {
             }
           }
         }
+        stopKeepAlive();
+      } else if (!isPlaying && activeAudioSource === 'music') {
+        startKeepAlive();
+        persistPlaybackSnapshot(true, false);
       }
     };
 
@@ -1559,10 +1645,13 @@ export default function App() {
     else audioRef.current?.pause();
     setIsPlaying(false);
     setIsBuffering(false);
+    persistPlaybackSnapshot(true, false);
+    startKeepAlive();
   };
 
   const resumePlayback = () => {
     const source = activeAudioSource;
+    stopKeepAlive();
     if (source === 'music' && !hasSelectedMusicRef.current) {
       showToast('Elige una canción para comenzar');
       return;
@@ -1596,7 +1685,7 @@ export default function App() {
       audio.load();
     } else {
       if (!IS_MOBILE_AUDIO) initWebAudio();
-      if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume().catch(console.warn);
+      resumeAudioContextIfNeeded(audioCtxRef.current, () => true);
       if (!audio.getAttribute('src')) {
         const url = playbackUrl(currentMusicTrack, fastApiUrl, window.location.href);
         if (!url) {
@@ -1607,18 +1696,32 @@ export default function App() {
         }
         audio.src = url;
       }
+      // Restaurar la posición guardada. Si aún no hay metadata, se aplica en
+      // loadedmetadata mediante pendingSeekRef.
+      if (pendingSeekRef.current > 0 && audio.readyState >= 1
+        && Number.isFinite(audio.duration) && audio.duration > 0) {
+        const target = Math.min(pendingSeekRef.current, Math.max(0, audio.duration - 0.25));
+        try { audio.currentTime = target; } catch {}
+        setCurrentTime(target);
+        pendingSeekRef.current = 0;
+      }
       setIsBuffering(true);
     }
     audio.play().then(() => {
       if (playbackIntentRef.current.isCurrent(ticket, source)) setIsPlaying(true);
       else if (!playbackIntentRef.current.wants(source)) audio.pause();
-    }).catch((error) => {
+    }).catch(async (error) => {
       if (!playbackIntentRef.current.isCurrent(ticket, source)) return;
+      if (source === 'music' && error?.name !== 'AbortError') {
+        const recovered = await recoverActiveMusicSource('resume-play-error');
+        if (recovered) return;
+      }
       playbackIntentRef.current.pause();
       setIsPlaying(false);
       setIsBuffering(false);
       logDiagnostic('playback.resume_error', { source, message: error?.message });
       showToast(source === 'radio' ? 'No se pudo reanudar la emisora. Prueba de nuevo.' : 'No se pudo reanudar esta canción.');
+      if (source === 'music') scheduleSkipUnplayable(playbackTrackRef.current);
     });
   };
 
@@ -1634,6 +1737,21 @@ export default function App() {
   useEffect(() => {
     updateMediaSessionPlaybackState(isPlaying);
   }, [isPlaying, currentTrack.id, musicSelection, activeAudioSource]);
+
+  // Mantener la pantalla despierta mientras hay música en primer plano. El
+  // navegador libera el wake lock al ocultar; al volver se solicita de nuevo.
+  useEffect(() => {
+    if (!isPlaying || activeAudioSource !== 'music') return;
+    const requestWakeLock = () => {
+      if (document.visibilityState === 'visible') void enableScreenWakeLock();
+    };
+    requestWakeLock();
+    document.addEventListener('visibilitychange', requestWakeLock);
+    return () => {
+      document.removeEventListener('visibilitychange', requestWakeLock);
+      if (!isWakeLockActive) releaseScreenWakeLock();
+    };
+  }, [isPlaying, activeAudioSource, isWakeLockActive]);
 
   useEffect(() => {
     registerMediaSessionHandlers({
@@ -1824,6 +1942,94 @@ export default function App() {
     return { ok: true, sourceTrack, resolvedUrl };
   };
 
+  // Recupera la pista activa cuando el socket o el Blob URL quedaron inválidos
+  // tras una pausa larga. Vuelve a resolver el Blob offline o refresca la URL
+  // de streaming y restaura la posición exacta antes de reanudar.
+  const recoverActiveMusicSource = async (reason: string): Promise<boolean> => {
+    const audio = audioRef.current;
+    const track = playbackTrackRef.current;
+    if (!audio || !track || recoveryInFlightRef.current) return false;
+    if (recoveryAttemptsRef.current >= 2) return false;
+    if (!playbackIntentRef.current.wants('music')) return false;
+    recoveryInFlightRef.current = true;
+    recoveryAttemptsRef.current += 1;
+    const savedTime = Number.isFinite(audio.currentTime) && audio.currentTime > 0
+      ? audio.currentTime
+      : currentTimeRef.current;
+    setIsBuffering(true);
+    logDiagnostic('recover.start', { title: track.title, reason, savedTime, attempt: recoveryAttemptsRef.current });
+    try {
+      let recoveryUrl = '';
+      const isOffline = track.sourceType !== 'youtube'
+        && offlineTracksRef.current.some(item => item.id === track.id);
+      protectOfflineTrackUrl(track.id);
+      if (isOffline) {
+        recoveryUrl = (await refreshOfflineTrackUrl(track.id).catch(() => null))
+          || getOfflineTrackUrl(track.id)
+          || '';
+      }
+      if (!recoveryUrl) {
+        const resolved = resolvePlayableMusic(track);
+        if (resolved.ok === false) return false;
+        recoveryUrl = resolved.resolvedUrl;
+        if (!recoveryUrl.startsWith('blob:') && !recoveryUrl.startsWith('data:')) {
+          const absolute = new URL(recoveryUrl, window.location.href);
+          if (absolute.origin === window.location.origin) {
+            absolute.searchParams.set('recover', String(Date.now()));
+            recoveryUrl = absolute.href;
+          }
+        }
+      }
+
+      audio.pause();
+      audio.src = recoveryUrl;
+      audio.load();
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          audio.removeEventListener('loadedmetadata', finish);
+          audio.removeEventListener('canplay', finish);
+          window.clearTimeout(timer);
+          resolve();
+        };
+        const timer = window.setTimeout(finish, 4000);
+        audio.addEventListener('loadedmetadata', finish);
+        audio.addEventListener('canplay', finish);
+      });
+      if (Number.isFinite(audio.duration) && audio.duration > 0) {
+        const target = Math.min(Math.max(0, savedTime), Math.max(0, audio.duration - 0.25));
+        try { audio.currentTime = target; } catch {}
+        setCurrentTime(target);
+      }
+      if (!playbackIntentRef.current.wants('music')) return false;
+      if (!IS_MOBILE_AUDIO) initWebAudio();
+      resumeAudioContextIfNeeded(audioCtxRef.current, () => true);
+      await audio.play();
+      if (!playbackIntentRef.current.wants('music')) {
+        audio.pause();
+        return false;
+      }
+      setActiveAudioSource('music');
+      setIsPlaying(true);
+      setIsBuffering(false);
+      if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+      recoveryAttemptsRef.current = 0;
+      logDiagnostic('recover.success', { title: track.title, reason, savedTime });
+      return true;
+    } catch (error) {
+      logDiagnostic('recover.error', {
+        title: track.title,
+        reason,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return false;
+    } finally {
+      recoveryInFlightRef.current = false;
+    }
+  };
+
   // Deja la siguiente pista lista en el deck que no está sonando. Así, cuando
   // termina la actual, no hay que abrir una conexión nueva ni esperar al
   // servidor: el cambio ocurre en milisegundos y el media session no se pierde.
@@ -1833,6 +2039,7 @@ export default function App() {
     if (!playbackIntentRef.current.wants('music')) return;
     const resolved = resolvePlayableMusic(upcoming);
     if (!resolved.ok) return;
+    protectOfflineTrackUrl(upcoming.id);
     const deck = standbyDeck();
     const element = deckElement(deck);
     if (!element || isActiveDeck(deck)) return;
@@ -1904,6 +2111,7 @@ export default function App() {
 
   const playSong = (track: Track, rememberPrevious = true, preserveQueue = false) => {
     if (!track) return;
+    stopKeepAlive();
     nextRequestRef.current++;
     const playbackRequest = nextRequestRef.current;
     if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
@@ -1921,6 +2129,7 @@ export default function App() {
       return;
     }
     const { sourceTrack, resolvedUrl } = resolved;
+    protectOfflineTrackUrl(sourceTrack.id);
     const candidateDeck = standbyDeck();
     const candidateAudio = deckElement(candidateDeck);
     const normalizedUrl = normalizeAudioUrl(resolvedUrl);
@@ -1951,6 +2160,8 @@ export default function App() {
     setIsPlaying(true);
     setIsBuffering(true);
     setCurrentTime(0);
+    pendingSeekRef.current = 0;
+    persistPlaybackSnapshot(true, true, 0);
     setLoopA(null);
     setLoopB(null);
 
@@ -1969,9 +2180,7 @@ export default function App() {
       return [sourceTrack, ...prev];
     });
 
-    if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
-      audioCtxRef.current.resume();
-    }
+    resumeAudioContextIfNeeded(audioCtxRef.current, () => true);
     // En móvil NO conectar el elemento al AudioContext: Android corta el audio
     // en segundo plano. El cambio de decks funciona igual con audio directo.
     if (!IS_MOBILE_AUDIO) initWebAudio();
@@ -2021,7 +2230,12 @@ export default function App() {
   const handleTimeUpdate = () => {
     if (!audioRef.current) return;
     const now = audioRef.current.currentTime;
+    resumeAudioContextIfNeeded(
+      audioCtxRef.current,
+      () => !audioRef.current?.paused && playbackIntentRef.current.wants('music'),
+    );
     setCurrentTime(now);
+    persistPlaybackSnapshot(false);
 
     updateMediaSessionPosition(now, duration, playbackSpeed);
 
@@ -2742,32 +2956,97 @@ export default function App() {
   }, [autoRadioEnabled, activeAudioSource, isPlaying, currentMusicTrack.id, nextSuggestion?.id,
       !!nextInPlaylist, telegramImportTarget, backgroundImportBusy, prefetchedAutoDjTrack?.id]);
 
+  const clearStallTimer = () => {
+    if (stallTimerRef.current) {
+      clearTimeout(stallTimerRef.current);
+      stallTimerRef.current = null;
+    }
+  };
+
+  const scheduleStallRecovery = () => {
+    if (stallTimerRef.current || !playbackIntentRef.current.wants('music')) return;
+    const trackId = playbackTrackRef.current?.id;
+    stallTimerRef.current = setTimeout(() => {
+      stallTimerRef.current = null;
+      const audio = audioRef.current;
+      if (!audio || audio.paused || playbackTrackRef.current?.id !== trackId) return;
+      if (audio.readyState >= 3) return;
+      void recoverActiveMusicSource('stalled').then(recovered => {
+        if (!recovered) scheduleSkipUnplayable(playbackTrackRef.current);
+      });
+    }, 10000);
+  };
+
   const handleDeckWaiting = (deck: 'a' | 'b') => {
     if (isActiveDeck(deck)) {
       if (!isBuffering) logDiagnostic('deck.waiting', { deck, title: playbackTrackRef.current?.title });
       setIsBuffering(true);
+      scheduleStallRecovery();
     }
+  };
+
+  const handleDeckStalled = (deck: 'a' | 'b') => {
+    if (!isActiveDeck(deck)) return;
+    logDiagnostic('deck.stalled', { deck, title: playbackTrackRef.current?.title });
+    scheduleStallRecovery();
   };
   const handleDeckPlaying = (deck: 'a' | 'b') => {
     if (!isActiveDeck(deck)) return;
     if (playbackTimeoutRef.current) clearTimeout(playbackTimeoutRef.current);
+    clearStallTimer();
+    recoveryAttemptsRef.current = 0;
     autoSkipRef.current.scheduled = false;
     autoSkipRef.current.count = 0;
     autoSkipRef.current.generation++;
     setIsBuffering(false);
+    updateMediaSessionPlaybackState(true);
+    updateMediaSessionPosition(
+      audioRef.current?.currentTime ?? 0,
+      audioRef.current?.duration || duration,
+      playbackSpeed,
+    );
+    persistPlaybackSnapshot(true, true);
     logDiagnostic('deck.playing', { deck, title: playbackTrackRef.current?.title });
     const id = playbackTrackRef.current?.id;
     if (id) setUnavailableTrackIds(previous => { if (!previous.has(id)) return previous; const next = new Set(previous); next.delete(id); return next; });
   };
   const handleDeckPause = (deck: 'a' | 'b') => {
-    if (isActiveDeck(deck)) setIsBuffering(false);
+    if (!isActiveDeck(deck)) return;
+    setIsBuffering(false);
+    updateMediaSessionPlaybackState(false);
+    updateMediaSessionPosition(
+      audioRef.current?.currentTime ?? 0,
+      audioRef.current?.duration || duration,
+      playbackSpeed,
+    );
+    persistPlaybackSnapshot(true, false);
   };
   const handleDeckTimeUpdate = (deck: 'a' | 'b') => {
-    if (isActiveDeck(deck)) handleTimeUpdate();
+    if (!isActiveDeck(deck)) return;
+    if (audioRef.current && audioRef.current.readyState >= 3) clearStallTimer();
+    handleTimeUpdate();
+  };
+
+  const handleDeckSeeked = (deck: 'a' | 'b') => {
+    if (!isActiveDeck(deck)) return;
+    const element = audioRef.current;
+    if (!element) return;
+    updateMediaSessionPosition(element.currentTime, element.duration || duration, playbackSpeed);
+    persistPlaybackSnapshot(true, isPlayingRef.current, element.currentTime);
   };
   const handleDeckLoadedMetadata = (deck: 'a' | 'b', e: React.SyntheticEvent<HTMLAudioElement>) => {
     if (isActiveDeck(deck) && activeAudioSource === 'music') {
-      setDuration((e.target as HTMLAudioElement).duration || currentMusicTrack.duration);
+      const element = e.target as HTMLAudioElement;
+      const loadedDuration = element.duration || currentMusicTrack.duration;
+      setDuration(loadedDuration);
+      if (pendingSeekRef.current > 0 && Number.isFinite(element.duration) && element.duration > 0) {
+        const target = Math.min(pendingSeekRef.current, Math.max(0, element.duration - 0.25));
+        try { element.currentTime = target; } catch {}
+        setCurrentTime(target);
+        pendingSeekRef.current = 0;
+      }
+      updateMediaSessionPosition(element.currentTime, loadedDuration, playbackSpeed);
+      persistPlaybackSnapshot(true, isPlayingRef.current, element.currentTime);
     }
   };
   const handleDeckError = (deck: 'a' | 'b', e: React.SyntheticEvent<HTMLAudioElement>) => {
@@ -2788,7 +3067,9 @@ export default function App() {
       // El deck de precarga falló. Un formato no soportado o un archivo dañado
       // se marca para que la cola lo salte en el cambio de pista.
       const failedId = standbyTrackIdRef.current;
-      if (failedId && (err?.code === MediaError.MEDIA_ERR_DECODE
+      const failedOffline = !!failedId
+        && offlineTracksRef.current.some(item => item.id === failedId);
+      if (failedId && !failedOffline && (err?.code === MediaError.MEDIA_ERR_DECODE
         || err?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED)) {
         failedPreloadIdsRef.current.add(failedId);
         setUnavailableTrackIds(previous => new Set(previous).add(failedId));
@@ -2800,13 +3081,16 @@ export default function App() {
       return;
     }
     setIsBuffering(false);
+    clearStallTimer();
     console.warn('Music stream event:', err?.code, err?.message);
-    if (activeAudioSource === 'music'
-      && playbackIntentRef.current.wants('music')
-      && err?.code !== MediaError.MEDIA_ERR_ABORTED) {
+    if (activeAudioSource !== 'music'
+      || !playbackIntentRef.current.wants('music')
+      || err?.code === MediaError.MEDIA_ERR_ABORTED) return;
+
+    const track = playbackTrackRef.current;
+    const failActive = () => {
       playbackIntentRef.current.pause();
       setIsPlaying(false);
-      const track = playbackTrackRef.current;
       if (track) {
         setUnavailableTrackIds(previous => new Set(previous).add(track.id));
         showToast(playbackFailureMessage(track));
@@ -2814,7 +3098,23 @@ export default function App() {
       } else {
         showToast('No se pudo reproducir esta pista. Prueba otra fuente o revisa la conexión.');
       }
+    };
+
+    // Un error de red puede recuperarse refrescando la URL. Un Blob offline
+    // inválido también se regenera una vez desde IndexedDB. Un formato dañado
+    // de una pista no offline se salta.
+    const offlineTrack = !!track && track.sourceType !== 'youtube'
+      && offlineTracksRef.current.some(item => item.id === track.id);
+    const recoverable = err?.code === MediaError.MEDIA_ERR_NETWORK
+      || (offlineTrack && (err?.code === MediaError.MEDIA_ERR_DECODE
+        || err?.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED));
+    if (recoverable && recoveryAttemptsRef.current < 2) {
+      void recoverActiveMusicSource('audio-error').then(recovered => {
+        if (!recovered) failActive();
+      });
+      return;
     }
+    failActive();
   };
   const handleDeckEnded = (deck: 'a' | 'b') => {
     if (isActiveDeck(deck) && activeAudioSource === 'music') {
@@ -2844,7 +3144,9 @@ export default function App() {
       describeAudio(audioDeckARef.current, 'Deck A'),
       describeAudio(audioDeckBRef.current, 'Deck B'),
       describeAudio(radioAudioRef.current, 'Radio'),
+      describeAudio(keepAliveAudioRef.current, 'KeepAlive'),
       `AudioContext: ${audioCtxRef.current ? audioCtxRef.current.state : 'no inicializado'}`,
+      `Recovery attempts: ${recoveryAttemptsRef.current}`,
       '',
       diagnosticsText(),
     ];
@@ -2867,6 +3169,8 @@ export default function App() {
         onPlaying={() => handleDeckPlaying('a')}
         onPause={() => handleDeckPause('a')}
         onTimeUpdate={() => handleDeckTimeUpdate('a')}
+        onSeeked={() => handleDeckSeeked('a')}
+        onStalled={() => handleDeckStalled('a')}
         onLoadedMetadata={(e) => handleDeckLoadedMetadata('a', e)}
         onError={(e) => handleDeckError('a', e)}
         onEnded={() => handleDeckEnded('a')}
@@ -2879,6 +3183,8 @@ export default function App() {
         onPlaying={() => handleDeckPlaying('b')}
         onPause={() => handleDeckPause('b')}
         onTimeUpdate={() => handleDeckTimeUpdate('b')}
+        onSeeked={() => handleDeckSeeked('b')}
+        onStalled={() => handleDeckStalled('b')}
         onLoadedMetadata={(e) => handleDeckLoadedMetadata('b', e)}
         onError={(e) => handleDeckError('b', e)}
         onEnded={() => handleDeckEnded('b')}
@@ -2925,6 +3231,17 @@ export default function App() {
             }
           }
         }}
+      />
+
+      {/* Bucle silencioso para conservar la sesión multimedia durante pausas largas. */}
+      <audio
+        ref={keepAliveAudioRef}
+        src="/keepalive.wav"
+        loop
+        preload="auto"
+        playsInline
+        aria-hidden="true"
+        style={{ position: 'fixed', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }}
       />
 
       {/* TOAST DE NOTIFICACIÓN FLOTANTE */}

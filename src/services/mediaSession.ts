@@ -84,6 +84,7 @@ export function registerMediaSessionHandlers(callbacks: MediaSessionCallbacks) {
 // Activar Wake Lock para evitar que Android o iOS suspenda el audio al apagar la pantalla
 export async function enableScreenWakeLock(): Promise<boolean> {
   if (!('wakeLock' in navigator)) return false;
+  if (wakeLockSentinel && !wakeLockSentinel.released) return true;
   try {
     wakeLockSentinel = await (navigator as any).wakeLock.request('screen');
     wakeLockSentinel.addEventListener('release', () => {

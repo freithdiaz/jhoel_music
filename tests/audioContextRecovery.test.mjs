@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 
 const { outputFiles } = await build({ entryPoints: ['src/services/audioContextRecovery.ts'], bundle: true, write: false, platform: 'node', format: 'esm' });
-const { watchAudioContextRecovery } = await import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].text).toString('base64')}`);
+const { watchAudioContextRecovery, audioContextNeedsResume, resumeAudioContextIfNeeded } = await import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].text).toString('base64')}`);
 
 function createContext(initialState = 'running') {
   const listeners = new Set();
@@ -53,4 +53,22 @@ test('no oculta errores al reanudar el contexto', async () => {
   await Promise.resolve();
   assert.deepEqual(errors, [failure]);
   dispose();
+});
+
+test('reconoce los estados suspended e interrupted de móvil', () => {
+  assert.equal(audioContextNeedsResume({ state: 'suspended' }), true);
+  assert.equal(audioContextNeedsResume({ state: 'interrupted' }), true);
+  assert.equal(audioContextNeedsResume({ state: 'running' }), false);
+  assert.equal(audioContextNeedsResume(null), false);
+});
+
+test('reanuda interrupted solo si la reproducción sigue activa', async () => {
+  const context = createContext('interrupted');
+  let wantsPlayback = false;
+  resumeAudioContextIfNeeded(context, () => wantsPlayback);
+  assert.equal(context.resumeCalls, 0);
+  wantsPlayback = true;
+  resumeAudioContextIfNeeded(context, () => wantsPlayback);
+  await Promise.resolve();
+  assert.equal(context.resumeCalls, 1);
 });
