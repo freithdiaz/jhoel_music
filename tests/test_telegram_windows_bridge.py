@@ -78,18 +78,28 @@ def test_transport_rejects_bad_key_or_route_before_network():
         bridge.bridge_request('a' * 43, '/other', {})
 
 
-def test_service_waits_only_when_idle_and_stops_on_failure(monkeypatch, tmp_path):
+def test_service_continues_after_failed_job_without_retrying(monkeypatch, tmp_path):
     states = iter(['completed', 'idle', 'failed'])
     calls = []
+
+    class StopService(Exception):
+        pass
+
+    def wait(seconds):
+        calls.append(seconds)
+        if len(calls) >= 3:
+            raise StopService
+
     monkeypatch.setattr(bridge, 'session_path', lambda: tmp_path / 'session')
     monkeypatch.setattr(bridge, 'bridge_request', lambda *args: {'accepted': True})
     monkeypatch.setattr(bridge, 'run_selection_once', lambda key: 'idle')
     monkeypatch.setattr(bridge, 'run_download_once', lambda key: 'idle')
     monkeypatch.setattr(bridge, 'run_delete_once', lambda key: 'idle')
-    monkeypatch.setattr(bridge, 'run_once', lambda key: next(states))
-    with pytest.raises(RuntimeError):
-        bridge.serve('key', wait=lambda seconds: calls.append(seconds))
-    assert calls == [2]
+    monkeypatch.setattr(bridge, 'run_once', lambda key: next(states, 'idle'))
+    with pytest.raises(StopService):
+        bridge.serve('key', wait=wait)
+    # Un trabajo fallido espera y sigue con solicitudes nuevas; no se reintenta.
+    assert calls == [2, 2, 2]
 
 
 def test_selection_reports_callback_result_once(monkeypatch):
@@ -155,7 +165,41 @@ def test_result_reference_binds_message_coordinate_without_disclosing_payload():
     with pytest.raises(SelectionUnavailable):
         registry.consume(results[0]['id'], operator='other-search')
     message_id, coordinate, snapshot = registry.consume(results[0]['id'], operator='search')
-    assert (message_id, coordinate, snapshot) == (33, (0, 0), bytes(message))
+    assert (message_id, coordinate, snapshot) == (33, (0, 0), bridge.message_fingerprint(message))
+
+
+def test_message_fingerprint_ignores_volatile_counters():
+    button = types.KeyboardInlineButton(text='1', type=types.InlineButtonTypeCallback(data=b'payload'))
+    markup = types.ReplyInlineMarkup(rows=[types.KeyboardButtonRow(buttons=[button])])
+    base = dict(id=33, peer_id=types.PeerChat(5498752855), from_id=types.PeerUser(bridge.BOT_ID),
+                date=datetime.now(timezone.utc), message='1. Canción',
+                reply_markup=markup)
+    first = bridge.message_fingerprint(types.Message(**base))
+    with_views = bridge.message_fingerprint(types.Message(**base, views=1234, forwards=7))
+    assert with_views == first
+    changed = bridge.message_fingerprint(types.Message(**{**base, 'message': '1. Otra'}))
+    assert changed != first
+
+
+def test_receipt_baseline_compacts_bot_update_queue(monkeypatch):
+    calls = []
+
+    def bot_request(token, method, payload):
+        calls.append((method, payload))
+        if method == 'getMe':
+            return {'username': 'mussicart_bot'}
+        if method == 'getWebhookInfo':
+            return {'url': ''}
+        if method == 'getUpdates':
+            return []
+        raise AssertionError(method)
+
+    monkeypatch.setattr(bridge, 'read_credentials', lambda: (1, 'a' * 32, '1:token'))
+    monkeypatch.setattr(bridge, 'bot_request', bot_request)
+    token, updates = bridge.receipt_baseline()
+    assert token == '1:token'
+    assert updates == []
+    assert calls[-1] == ('getUpdates', {'offset': -50, 'limit': 100, 'timeout': 0})
 
 
 def test_selection_revalidation_rejects_changed_message(monkeypatch):
@@ -181,6 +225,7 @@ def test_selection_revalidation_rejects_changed_message(monkeypatch):
     monkeypatch.setattr(bridge, 'verify_identity', identity)
     monkeypatch.setattr(telethon.sessions, 'StringSession', lambda value: value)
     monkeypatch.setattr(telethon, 'TelegramClient', lambda *args, **kwargs: Client())
+    monkeypatch.setattr(bridge, 'message_fingerprint', lambda message: b'changed')
     called = []
     monkeypatch.setattr(telegram_third_party_callback, 'prepare', lambda *args, **kwargs: called.append(True))
     with pytest.raises(ValueError):
@@ -217,6 +262,7 @@ def test_callback_sent_once_after_revalidation(monkeypatch):
     monkeypatch.setattr(bridge, 'verify_identity', identity)
     monkeypatch.setattr(telethon.sessions, 'StringSession', lambda value: value)
     monkeypatch.setattr(telethon, 'TelegramClient', lambda *args, **kwargs: Client())
+    monkeypatch.setattr(bridge, 'message_fingerprint', lambda message: b'original')
     monkeypatch.setattr(telegram_third_party_callback, 'prepare', lambda *args, **kwargs: None)
     monkeypatch.setattr(telegram_third_party_callback, '_button', lambda *args: b'payload')
     asyncio.run(bridge.verify_selection('search', option, registry=registry, send_callback=True))

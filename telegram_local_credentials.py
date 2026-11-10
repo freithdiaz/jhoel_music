@@ -109,7 +109,8 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def bot_request(token, method, payload):
-    # No offset: getUpdates must never acknowledge an update. Do not log errors.
+    # El llamador controla el offset de getUpdates. El puente conserva solo
+    # las últimas actualizaciones necesarias y exige ser el único consumidor.
     request = urllib.request.Request(
         'https://api.telegram.org/bot' + token + '/' + method,
         data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json'})

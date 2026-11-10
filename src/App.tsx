@@ -68,6 +68,12 @@ import {
   RADIO_COUNTRIES
 } from './services/radioApi';
 
+// En móvil, conectar el elemento de audio al AudioContext hace que Android
+// suspenda el contexto y corte la reproducción al apagar la pantalla. El DSP
+// se conserva en escritorio; en móvil el audio va directo para poder seguir
+// en segundo plano con Bluetooth.
+const IS_MOBILE_AUDIO = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
 // ==========================================
 // CATÁLOGO INICIAL CURADO
 // ==========================================
@@ -478,6 +484,83 @@ export default function App() {
   const [personalTracks, setPersonalTracks] = useState<Track[]>([]);
   const [musicRegion, setMusicRegion] = useState(() => localStorage.getItem('thomas_music_region') || 'CO');
 
+  // Persistencia del último estado de reproducción: si Android cierra o
+  // recarga la PWA, no debe volver al primer tema de la playlist.
+  const playbackStateKey = `thomas_music_playback:${currentUser?.username || 'invitado'}:${fastApiUrl}`;
+  const restoredPlaybackKeyRef = useRef('');
+  const skipPlaybackPersistRef = useRef(false);
+  const pendingRestoreTrackIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (restoredPlaybackKeyRef.current === playbackStateKey) return;
+    restoredPlaybackKeyRef.current = playbackStateKey;
+    let saved: any = null;
+    try { saved = JSON.parse(localStorage.getItem(playbackStateKey) || 'null'); } catch { saved = null; }
+    if (!saved || !Array.isArray(saved.tracks) || !saved.tracks.length) return;
+    const restoredTracks = saved.tracks.filter((item: unknown): item is Track =>
+      !!item && typeof item === 'object'
+      && typeof (item as Track).id === 'string'
+      && typeof (item as Track).audioUrl === 'string');
+    if (!restoredTracks.length) return;
+    const index = Number.isInteger(saved.index)
+      ? Math.min(Math.max(saved.index, 0), restoredTracks.length - 1) : 0;
+    const current = restoredTracks[index];
+    const queue: PlaybackQueue = {
+      name: typeof saved.name === 'string' && saved.name ? saved.name : 'Playlist',
+      tracks: restoredTracks,
+      index,
+    };
+    // Dejar los decks limpios: al pulsar play se resolverá la pista restaurada,
+    // no una fuente vieja que hubiera quedado cargada en el elemento.
+    for (const audio of [audioDeckARef.current, audioDeckBRef.current]) {
+      if (!audio) continue;
+      audio.pause();
+      audio.removeAttribute('src');
+      audio.load();
+    }
+    activeDeckRef.current = 'a';
+    standbyPrimedRef.current = false;
+    standbyTrackIdRef.current = null;
+    deckUrlsRef.current = { a: null, b: null };
+    primeAttemptRef.current++;
+    skipPlaybackPersistRef.current = true;
+    pendingRestoreTrackIdRef.current = current.id;
+    updatePlaybackQueue(queue);
+    setTracks(prev => {
+      const queueIds = new Set(restoredTracks.map(t => t.id));
+      return [...restoredTracks, ...prev.filter(t => !queueIds.has(t.id))];
+    });
+    playbackTrackRef.current = current;
+    hasSelectedMusicRef.current = true;
+    setMusicSelection(value => value || 1);
+    setDuration(current.duration || 0);
+    setCurrentTime(0);
+    setIsPlaying(false);
+  }, [playbackStateKey]);
+
+  useEffect(() => {
+    const id = pendingRestoreTrackIdRef.current;
+    if (!id) return;
+    const index = tracks.findIndex(t => t.id === id);
+    if (index < 0) return;
+    pendingRestoreTrackIdRef.current = null;
+    setCurrentTrackIndex(index);
+  }, [tracks]);
+
+  useEffect(() => {
+    if (skipPlaybackPersistRef.current) {
+      skipPlaybackPersistRef.current = false;
+      return;
+    }
+    try {
+      if (playbackQueue && playbackQueue.tracks.length) {
+        localStorage.setItem(playbackStateKey, JSON.stringify(playbackQueue));
+      } else {
+        localStorage.removeItem(playbackStateKey);
+      }
+    } catch {}
+  }, [playbackQueue, playbackStateKey]);
+
   // Guardar datos del usuario activo en cada cambio
   useEffect(() => {
     const u = currentUser ? currentUser.username : 'invitado';
@@ -806,6 +889,7 @@ export default function App() {
   const deckUrlsRef = useRef<{ a: string | null; b: string | null }>({ a: null, b: null });
   const standbyTrackIdRef = useRef<string | null>(null);
   const standbyPrimedRef = useRef(false);
+  const primeAttemptRef = useRef(0);
   const handleNextTrackRef = useRef<() => void>(() => {});
   const audioRef = useMemo(() => ({
     get current(): HTMLAudioElement | null {
@@ -846,10 +930,12 @@ export default function App() {
   const cancelStandbyPrime = () => {
     if (!standbyPrimedRef.current) return;
     standbyPrimedRef.current = false;
+    primeAttemptRef.current++;
     const deck = standbyDeck();
     const element = deckElement(deck);
     if (element) {
       element.pause();
+      element.volume = isMuted ? 0 : Math.min(1, Math.max(0, volume));
       try { element.currentTime = 0; } catch {}
     }
     setDeckGain(deck, 1);
@@ -1268,9 +1354,14 @@ export default function App() {
 
   useEffect(() => {
     const targetVol = isMuted ? 0 : Math.min(1, Math.max(0, volume));
-    for (const audio of [audioDeckARef.current, audioDeckBRef.current]) {
-      // El elemento HTMLAudioElement solo acepta rango [0, 1]
-      if (audio) audio.volume = targetVol;
+    const decks: [AudioDeck, HTMLAudioElement | null][] = [
+      ['a', audioDeckARef.current],
+      ['b', audioDeckBRef.current],
+    ];
+    for (const [deck, audio] of decks) {
+      // El elemento HTMLAudioElement solo acepta rango [0, 1].
+      // El deck que está cebado en silencio conserva volumen casi cero.
+      if (audio) audio.volume = standbyPrimedRef.current && !isActiveDeck(deck) ? 0.0001 : targetVol;
     }
     if (radioAudioRef.current) {
       radioAudioRef.current.volume = targetVol;
@@ -1449,7 +1540,7 @@ export default function App() {
       audio.src = currentRadioStation.audioUrl;
       audio.load();
     } else {
-      initWebAudio();
+      if (!IS_MOBILE_AUDIO) initWebAudio();
       if (audioCtxRef.current?.state === 'suspended') audioCtxRef.current.resume().catch(console.warn);
       if (!audio.getAttribute('src')) {
         const url = playbackUrl(currentMusicTrack, fastApiUrl, window.location.href);
@@ -1811,12 +1902,15 @@ export default function App() {
     if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
       audioCtxRef.current.resume();
     }
-    initWebAudio();
+    // En móvil NO conectar el elemento al AudioContext: Android corta el audio
+    // en segundo plano. El cambio de decks funciona igual con audio directo.
+    if (!IS_MOBILE_AUDIO) initWebAudio();
 
     if (canReuseStandby && candidateAudio) {
       const previousAudio = audioRef.current;
       activeDeckRef.current = candidateDeck;
       standbyPrimedRef.current = false;
+      primeAttemptRef.current++;
       standbyTrackIdRef.current = null;
       if (previousAudio && previousAudio !== candidateAudio) previousAudio.pause();
       try { candidateAudio.currentTime = 0; } catch {}
@@ -1869,9 +1963,8 @@ export default function App() {
     const remaining = actualDuration - now;
     const standbyDeckId = standbyDeck();
     const standby = deckElement(standbyDeckId);
-    const standbyGain = deckGainNodesRef.current[standbyDeckId];
-    const standbyContext = audioCtxRef.current;
-    if (standby && standbyGain && standbyContext && shouldPrimeStandby(
+    const targetVol = isMuted ? 0 : Math.min(1, Math.max(0, volume));
+    if (standby && standbyTrackIdRef.current === upcomingMusicTrack?.id && shouldPrimeStandby(
       document.visibilityState,
       standbyPrimedRef.current,
       remaining,
@@ -1880,18 +1973,35 @@ export default function App() {
       !!standby.error,
       standby.paused
     )) {
+      const attempt = ++primeAttemptRef.current;
       try {
         standby.currentTime = 0;
-        standbyGain.gain.setValueAtTime(0.0001, standbyContext.currentTime);
+        standby.volume = 0.0001;
+        setDeckGain(standbyDeckId, 0.0001);
         standbyPrimedRef.current = true;
         standby.play().catch(() => {
+          // Si ya se promovió o se canceló, no tocar el audio activo/nuevo.
+          if (attempt !== primeAttemptRef.current || isActiveDeck(standbyDeckId)) return;
+          if (!standbyPrimedRef.current) return;
           standbyPrimedRef.current = false;
-          try { standbyGain.gain.setValueAtTime(1, standbyContext.currentTime); } catch {}
+          standby.volume = targetVol;
+          setDeckGain(standbyDeckId, 1);
           standby.pause();
         });
       } catch {
         standbyPrimedRef.current = false;
+        standby.volume = targetVol;
+        setDeckGain(standbyDeckId, 1);
       }
+    }
+
+    // Precarga la siguiente pista solo en el último tramo, para no competir
+    // con el audio actual durante toda la canción ni saturar la conexión.
+    if (remaining > 0 && remaining <= 45
+      && upcomingMusicTrack && !upcomingNeedsTelegramImport && !useSynthFallback
+      && !(backgroundImportBusy && !nextInPlaylist)
+      && standbyTrackIdRef.current !== upcomingMusicTrack.id) {
+      prepareStandbyTrack(upcomingMusicTrack);
     }
 
     const progress = listeningRef.current;
@@ -2240,7 +2350,17 @@ export default function App() {
             lyrics: [{ time: 0, text: `♪ Streaming desde ${fastApiUrl} ♪` }]
           }));
           importedTracks = imported;
-          setTracks((prev) => [...imported, ...prev.filter(track => !imported.some(item => item.id === track.id))]);
+          setTracks((prev) => {
+            const currentId = playbackTrackRef.current?.id;
+            const next = [...imported, ...prev.filter(track => !imported.some(item => item.id === track.id))];
+            // La biblioteca se inserta al principio: conservar el índice de la
+            // pista que está sonando (o restaurada) para no saltar a otra.
+            if (currentId) {
+              const index = next.findIndex(track => track.id === currentId);
+              if (index >= 0) setCurrentTrackIndex(index);
+            }
+            return next;
+          });
         }
       }
       setServerStatus('connected');
@@ -2481,8 +2601,9 @@ export default function App() {
     && !!nextSuggestion && isYouTubeResult(nextSuggestion);
 
   useEffect(() => {
-    // Una cola explícita se reproduce directo aunque haya una importación
-    // Telegram en curso; solo Auto-DJ depende de que esa importación termine.
+    // La precarga real se dispara desde handleTimeUpdate al entrar en los
+    // últimos 30 s. Este efecto solo invalida el deck cuando la siguiente
+    // pista cambia o deja de estar disponible.
     const waitingForAutoDjImport = backgroundImportBusy && !nextInPlaylist;
     if (!isPlaying || activeAudioSource !== 'music' || useSynthFallback || waitingForAutoDjImport || !upcomingMusicTrack || upcomingNeedsTelegramImport) {
       standbyTrackIdRef.current = null;
@@ -2493,14 +2614,8 @@ export default function App() {
       standbyTrackIdRef.current = null;
       cancelStandbyPrime();
     }
-    // Precarga con margen: en primer plano no compite con el arranque de la
-    // pista actual; en segundo plano empieza antes para que una pista corta
-    // también tenga la siguiente lista.
-    const delay = document.visibilityState === 'hidden' ? 500 : 3000;
-    const timer = window.setTimeout(() => prepareStandbyTrack(upcomingMusicTrack), delay);
-    return () => window.clearTimeout(timer);
   }, [isPlaying, activeAudioSource, currentMusicTrack.id, musicSelection, useSynthFallback,
-      backgroundImportBusy, !!nextInPlaylist, upcomingMusicTrack?.id, upcomingMusicTrack?.audioUrl, upcomingNeedsTelegramImport]);
+      backgroundImportBusy, !!nextInPlaylist, upcomingMusicTrack?.id, upcomingNeedsTelegramImport]);
 
   useEffect(() => {
     if (!autoRadioEnabled || activeAudioSource !== 'music' || !isPlaying || !hasSelectedMusicRef.current) return;
@@ -2545,7 +2660,10 @@ export default function App() {
     }
   };
   const handleDeckError = (deck: 'a' | 'b', e: React.SyntheticEvent<HTMLAudioElement>) => {
-    const err = (e.target as HTMLAudioElement).error;
+    const element = e.target as HTMLAudioElement;
+    // Al limpiar un deck durante la restauración no hay fuente: no es un fallo.
+    if (!element.getAttribute('src')) return;
+    const err = element.error;
     if (!isActiveDeck(deck)) {
       // El deck de precarga falló; se reintentará cuando toque esa pista.
       deckUrlsRef.current[deck] = null;
@@ -4281,6 +4399,11 @@ export default function App() {
                   <p className="text-xs text-zinc-400">
                     Ajuste fino de graves potentes, presets DJ y ganancia de volumen por encima del 100% para audífonos e intercomunicador.
                   </p>
+                  {IS_MOBILE_AUDIO && (
+                    <p className="mt-1 text-xs text-amber-300">
+                      En móvil el ecualizador y el boost por Web Audio están desactivados para que Android no corte la música en segundo plano. La velocidad y los presets de tempo sí se aplican.
+                    </p>
+                  )}
                 </div>
                 <button
                   onClick={() => applyAudioPreset('normal')}

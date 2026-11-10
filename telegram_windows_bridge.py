@@ -1,6 +1,7 @@
 """Puente local supervisado: búsqueda, selección, descarga y borrado solo tras confirmación."""
 
 import asyncio
+import hashlib
 import hmac
 import json
 import logging
@@ -71,6 +72,47 @@ def bridge_request(key, path, body):
     return result
 
 
+def message_fingerprint(message):
+    """Huella estable del mensaje y sus botones, sin campos volátiles.
+
+    ``bytes(message)`` incluye contadores como vistas, reenvíos, reacciones o
+    fecha de edición. Esos campos cambian solos y hacían fallar la revalidación
+    aunque la lista y los botones siguieran siendo los mismos. La huella cubre
+    solo lo que define la selección: id, texto, remitente, respuesta y botones.
+    """
+    from telethon.tl import types
+
+    if type(message.id) is not int or message.id <= 0:
+        raise ValueError('Mensaje inválido')
+    if not isinstance(message.message, str):
+        raise ValueError('Texto inválido')
+    digest = hashlib.sha256()
+    digest.update(str(message.id).encode('ascii'))
+    digest.update(b'\0')
+    digest.update(message.message.encode('utf-8'))
+    digest.update(b'\0')
+    for name in ('from_id', 'peer_id'):
+        value = getattr(message, name, None)
+        if value is not None:
+            digest.update(name.encode('ascii'))
+            digest.update(bytes(value))
+    reply = getattr(message, 'reply_to', None)
+    if reply is not None:
+        digest.update(bytes(reply))
+    else:
+        reply_to = getattr(message, 'reply_to_msg_id', None)
+        digest.update(str(reply_to or '').encode('ascii'))
+    markup = message.reply_markup
+    if type(markup) is not types.ReplyInlineMarkup:
+        raise ValueError('Botones inválidos')
+    for row in markup.rows:
+        digest.update(b'\1')
+        for button in row.buttons:
+            digest.update(b'\2')
+            digest.update(bytes(button))
+    return digest.digest()
+
+
 def observed_results(messages, *, search_id, sent_id, registry):
     """Vincula cada etiqueta con mensaje y coordenada, sin divulgar el payload."""
     from telethon.tl import types
@@ -85,9 +127,7 @@ def observed_results(messages, *, search_id, sent_id, registry):
                 continue
             if type(message.id) is not int or message.id <= 0:
                 continue
-            snapshot = bytes(message)
-            if len(snapshot) > 1024 * 1024:
-                continue
+            snapshot = message_fingerprint(message)
             if type(message.reply_markup) is not types.ReplyInlineMarkup:
                 continue
             rows = []
@@ -196,7 +236,7 @@ async def verify_selection(search_id, result_id, *, registry, send_callback=Fals
                 client, account_id=ACCOUNT_ID, bot_id=BOT_ID, confirmed_bot_id=BOT_ID,
                 group_id=GROUP_ID, confirmed_group_id=GROUP_ID), 30)
             message = await asyncio.wait_for(client.get_messages(group, ids=message_id), 15)
-            if message is None or not hmac.compare_digest(bytes(message), snapshot):
+            if message is None or not hmac.compare_digest(message_fingerprint(message), snapshot):
                 raise ValueError('Mensaje cambiado o no disponible')
             prepare(message, coordinate, me=me, bot=bot, group=group,
                     account_id=ACCOUNT_ID, bot_id=BOT_ID, group_id=GROUP_ID)
@@ -211,7 +251,13 @@ async def verify_selection(search_id, result_id, *, registry, send_callback=Fals
 
 
 def receipt_baseline():
-    """Leer una página sin confirmar actualizaciones ni modificar webhook."""
+    """Leer las actualizaciones recientes sin modificar el webhook.
+
+    La Bot API no confirma actualizaciones si no se envía un offset; con el uso
+    normal la cola crece hasta 100 y entonces deja de verse cualquier mensaje
+    nuevo. El puente es el único consumidor del bot: conservamos las últimas 50
+    actualizaciones (donde está la selección reciente) y olvidamos las previas.
+    """
     _, _, token = read_credentials()
     bot = bot_request(token, 'getMe', {})
     if not isinstance(bot, dict) or str(bot.get('username', '')).lower() != 'mussicart_bot':
@@ -219,7 +265,7 @@ def receipt_baseline():
     webhook = bot_request(token, 'getWebhookInfo', {})
     if not isinstance(webhook, dict) or webhook.get('url') != '':
         raise ValueError('Webhook activo o desconocido')
-    updates = bot_request(token, 'getUpdates', {'limit': 100, 'timeout': 0})
+    updates = bot_request(token, 'getUpdates', {'offset': -50, 'limit': 100, 'timeout': 0})
     # Validar página antes de cualquier efecto externo.
     new_audio_candidates(updates, updates, group_id=GROUP_ID, sender_id=BOT_ID)
     return token, updates
@@ -266,8 +312,9 @@ def run_selection_once(key, *, wait=time.sleep):
         return 'failed'
     try:
         # Espera acotada; observar no repite el callback ni confirma updates.
+        # Algunos audios tardan más en aparecer en el grupo.
         receipt = None
-        for _ in range(20):
+        for _ in range(45):
             wait(1)
             receipt = receipt_after(token, before, search_id)
             if receipt is not None:
@@ -405,7 +452,12 @@ def run_delete_once(key):
 
 
 def serve(key, *, wait=time.sleep):
-    """Atiende búsquedas secuenciales; un fallo detiene el servicio sin reintentar."""
+    """Atiende trabajos secuenciales sin reintentar los que quedan inciertos.
+
+    Un fallo deja el trabajo actual en estado incierto y no se vuelve a tocar;
+    el proceso sigue vivo para atender solicitudes nuevas. Así un error aislado
+    de red o de Telegram no obliga a reiniciar el puente para cada canción.
+    """
     while True:
         bridge_request(key, '/telegram/bridge/heartbeat', {
             'session_present': session_path().is_file(),
@@ -416,22 +468,26 @@ def serve(key, *, wait=time.sleep):
         })
         deleted = run_delete_once(key)
         if deleted == 'failed':
-            raise RuntimeError('Resultado incierto')
+            wait(2)
+            continue
         if deleted == 'deleted':
             continue
         downloaded = run_download_once(key)
         if downloaded == 'failed':
-            raise RuntimeError('Resultado incierto')
+            wait(2)
+            continue
         if downloaded == 'saved':
             continue
         selected = run_selection_once(key)
         if selected == 'failed':
-            raise RuntimeError('Resultado incierto')
+            wait(2)
+            continue
         if selected == 'confirmed':
             continue
         result = run_once(key)
         if result == 'failed':
-            raise RuntimeError('Resultado incierto')
+            wait(2)
+            continue
         if result == 'idle':
             wait(2)
 
