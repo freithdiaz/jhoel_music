@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Capacitor } from '@capacitor/core';
 import { TelegramStatus } from './TelegramStatus';
 import { TelegramBackgroundImport } from './TelegramBackgroundImport';
 import type { BackgroundImportResult } from './TelegramBackgroundImport';
@@ -76,7 +77,11 @@ import {
 // suspenda el contexto y corte la reproducción al apagar la pantalla. El DSP
 // se conserva en escritorio; en móvil el audio va directo para poder seguir
 // en segundo plano con Bluetooth.
+const IS_NATIVE_APP = Capacitor.isNativePlatform();
 const IS_MOBILE_AUDIO = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+// En la APK nativa el servicio en primer plano mantiene el proceso y el DSP sí
+// puede usar Web Audio. En la PWA móvil se usa audio directo para no cortar.
+const IS_MOBILE_WEB = IS_MOBILE_AUDIO && !IS_NATIVE_APP;
 
 // ==========================================
 // CATÁLOGO INICIAL CURADO
@@ -406,11 +411,25 @@ export default function App() {
   const HOME_PAGE_SIZE = 10;
 
   // En desarrollo Vite proporciona /api; en producción el servidor web debe enviarlo a FastAPI.
-  const [fastApiUrl, setFastApiUrl] = useState(
-    new URL(import.meta.env.VITE_API_BASE_URL || '/api', window.location.origin).href.replace(/\/$/, '')
-  );
+  // En la APK no hay backend local: la URL se configura una vez en el modal de servidor y se recuerda.
+  const [fastApiUrl, setFastApiUrl] = useState(() => {
+    try {
+      const saved = localStorage.getItem('diaz-music-server-url');
+      if (saved) return new URL(saved).href.replace(/\/$/, '');
+    } catch {}
+    return new URL(import.meta.env.VITE_API_BASE_URL || '/api', window.location.origin).href.replace(/\/$/, '');
+  });
   const [serverStatus, setServerStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
   const [telegramImportCount, setTelegramImportCount] = useState(0);
+
+  useEffect(() => {
+    // No guardar URLs a medio escribir mientras el usuario teclea la IP.
+    try {
+      if (/^https?:\/\/[^/\s]+/i.test(fastApiUrl)) {
+        localStorage.setItem('diaz-music-server-url', fastApiUrl);
+      }
+    } catch {}
+  }, [fastApiUrl]);
 
   // ==========================================
   // AUTENTICACIÓN & SESIÓN MULTIUSUARIO (USUARIO Y CONTRASEÑA)
@@ -642,8 +661,23 @@ export default function App() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
-  // Modal para configuración de Servidor
-  const [showServerModal, setShowServerModal] = useState(false);
+  // Modal para configuración de Servidor. En la APK se abre la primera vez
+  // para que el usuario indique la URL del backend (no existe uno local).
+  const [showServerModal, setShowServerModal] = useState(() => {
+    if (!IS_NATIVE_APP) return false;
+    try {
+      const saved = localStorage.getItem('diaz-music-server-url');
+      // El valor por defecto de la APK es https://localhost/api, que no tiene
+      // backend: se considera "sin configurar" y se vuelve a pedir.
+      return !saved || /^https?:\/\/localhost\/api\/?$/.test(saved) || /^capacitor:\/\/localhost\/api\/?$/.test(saved);
+    } catch { return true; }
+  });
+
+  // Texto editable del modal. Se aplica al pulsar "Conectar", no en cada tecla.
+  const [serverUrlInput, setServerUrlInput] = useState(() => {
+    if (IS_NATIVE_APP && /^https?:\/\/localhost\/api\/?$/.test(fastApiUrl)) return '';
+    return fastApiUrl;
+  });
 
   // Métodos de autenticación
   const applyLoadedUserData = (user: UserProfile | null, data?: UserData) => {
@@ -1021,7 +1055,7 @@ export default function App() {
   };
 
   const startKeepAlive = () => {
-    if (!IS_MOBILE_AUDIO) return;
+    if (!IS_MOBILE_WEB) return;
     const element = keepAliveAudioRef.current;
     if (!element) return;
     element.volume = 0.0001;
@@ -1684,7 +1718,7 @@ export default function App() {
       audio.src = currentRadioStation.audioUrl;
       audio.load();
     } else {
-      if (!IS_MOBILE_AUDIO) initWebAudio();
+      if (!IS_MOBILE_WEB) initWebAudio();
       resumeAudioContextIfNeeded(audioCtxRef.current, () => true);
       if (!audio.getAttribute('src')) {
         const url = playbackUrl(currentMusicTrack, fastApiUrl, window.location.href);
@@ -2004,7 +2038,7 @@ export default function App() {
         setCurrentTime(target);
       }
       if (!playbackIntentRef.current.wants('music')) return false;
-      if (!IS_MOBILE_AUDIO) initWebAudio();
+      if (!IS_MOBILE_WEB) initWebAudio();
       resumeAudioContextIfNeeded(audioCtxRef.current, () => true);
       await audio.play();
       if (!playbackIntentRef.current.wants('music')) {
@@ -2183,7 +2217,7 @@ export default function App() {
     resumeAudioContextIfNeeded(audioCtxRef.current, () => true);
     // En móvil NO conectar el elemento al AudioContext: Android corta el audio
     // en segundo plano. El cambio de decks funciona igual con audio directo.
-    if (!IS_MOBILE_AUDIO) initWebAudio();
+    if (!IS_MOBILE_WEB) initWebAudio();
 
     if (canReuseStandby && candidateAudio) {
       const previousDeck = activeDeckRef.current;
@@ -2614,12 +2648,25 @@ export default function App() {
   };
 
   // Conexión con Servidor FastAPI Local
-  const connectFastApiServer = async (announce = true): Promise<Track[] | null> => {
+  const connectFastApiServer = async (announce = true, urlOverride?: string): Promise<Track[] | null> => {
+    // Normaliza la URL escrita en el modal de la APK: acepta "192.168.1.10:8000",
+    // elimina barras finales y evita rutas duplicadas tipo "//tracks".
+    let apiBase = (urlOverride ?? fastApiUrl).trim();
+    if (apiBase && !/^[a-z][a-z0-9+.-]*:\/\//i.test(apiBase) && !apiBase.startsWith('/')) {
+      apiBase = `http://${apiBase}`;
+    }
+    apiBase = apiBase.replace(/\/+$/, '');
+    if (!apiBase) {
+      setServerStatus('disconnected');
+      if (announce) showToast('Escribe la URL del servidor (por ejemplo http://192.168.1.10:8000).');
+      return null;
+    }
+    if (apiBase !== fastApiUrl) setFastApiUrl(apiBase);
     setServerStatus('connecting');
     try {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 2500);
-      const res = await fetch(`${fastApiUrl}/tracks`, { signal: controller.signal });
+      const res = await fetch(`${apiBase}/tracks`, { signal: controller.signal });
       clearTimeout(timeoutId);
 
       if (!res.ok) throw new Error('Biblioteca no disponible');
@@ -2644,12 +2691,12 @@ export default function App() {
             danceability: 85,
             genre: item.genre || 'Self-Hosted',
             coverUrl: typeof item.cover_url === 'string' && /^\/telegram\/cover\/telegram-[0-9a-f]{32}\.jpg$/.test(item.cover_url)
-              ? `${fastApiUrl}${item.cover_url}` : item.cover_url || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80',
-            audioUrl: `${fastApiUrl}/stream/${encodeURIComponent(item.filename)}`,
+              ? `${apiBase}${item.cover_url}` : item.cover_url || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=600&auto=format&fit=crop&q=80',
+            audioUrl: `${apiBase}/stream/${encodeURIComponent(item.filename)}`,
             sourceType: 'fastapi',
             cachedOffline: false,
             liked: false,
-            lyrics: [{ time: 0, text: `♪ Streaming desde ${fastApiUrl} ♪` }]
+            lyrics: [{ time: 0, text: `♪ Streaming desde ${apiBase} ♪` }]
           }));
           importedTracks = imported;
           logDiagnostic('library.load', { count: imported.length });
@@ -2676,11 +2723,27 @@ export default function App() {
     }
   };
 
+  const handleConnectServer = async () => {
+    let normalized = serverUrlInput.trim();
+    if (normalized && !/^[a-z][a-z0-9+.-]*:\/\//i.test(normalized) && !normalized.startsWith('/')) {
+      normalized = `http://${normalized}`;
+    }
+    normalized = normalized.replace(/\/+$/, '');
+    if (!normalized) {
+      showToast('Escribe la IP y el puerto del servidor, por ejemplo 192.168.0.36:8000.');
+      return;
+    }
+    setServerUrlInput(normalized);
+    setFastApiUrl(normalized);
+    await connectFastApiServer(true, normalized);
+  };
+
   useEffect(() => {
     // Carga la biblioteca del servidor (incluidas importaciones) al iniciar.
+    // Los cambios de URL se aplican desde handleConnectServer, no por tecla.
     void connectFastApiServer(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fastApiUrl]);
+  }, []);
 
   const onTelegramPublished = async (filename?: string) => {
     const imported = await connectFastApiServer(false);
@@ -3369,6 +3432,19 @@ export default function App() {
             <span>Subir MP3</span>
             <input type="file" accept="audio/*" multiple onChange={handleLocalFileUpload} className="hidden" />
           </label>
+
+          <button
+            type="button"
+            onClick={() => {
+              setServerUrlInput(/^https?:\/\/localhost\/api\/?$/.test(fastApiUrl) ? '' : fastApiUrl);
+              setShowServerModal(true);
+            }}
+            className="p-2 rounded-xl bg-zinc-900 border border-zinc-700/80 text-zinc-300 hover:text-white shadow"
+            title="Configurar servidor"
+            aria-label="Configurar servidor"
+          >
+            <Server className="w-4 h-4" />
+          </button>
 
           <button
             type="button"
@@ -4890,7 +4966,7 @@ export default function App() {
                   <p className="text-xs text-zinc-400">
                     Ajuste fino de graves potentes, presets DJ y ganancia de volumen por encima del 100% para audífonos e intercomunicador.
                   </p>
-                  {IS_MOBILE_AUDIO && (
+                  {IS_MOBILE_WEB && (
                     <p className="mt-1 text-xs text-amber-300">
                       En móvil el ecualizador y el boost por Web Audio están desactivados para que Android no corte la música en segundo plano. La velocidad y los presets de tempo sí se aplican.
                     </p>
@@ -6132,11 +6208,19 @@ export default function App() {
               <label className="text-xs font-bold text-zinc-300 block mb-1">URL del Servidor FastAPI:</label>
               <input
                 type="text"
-                value={fastApiUrl}
-                onChange={(e) => setFastApiUrl(e.target.value)}
-                placeholder="http://localhost:8000"
+                inputMode="url"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                value={serverUrlInput}
+                onChange={(e) => setServerUrlInput(e.target.value)}
+                onFocus={(e) => e.currentTarget.select()}
+                placeholder="http://192.168.0.36:8000"
                 className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3.5 py-2 text-xs font-mono text-zinc-200 focus:outline-none focus:border-emerald-500"
               />
+              <p className="mt-1.5 text-[10px] text-zinc-500">
+                Escribe solo la IP y el puerto de tu PC, por ejemplo <code className="text-zinc-400">192.168.0.36:8000</code>. La app añade <code className="text-zinc-400">http://</code> si falta.
+              </p>
             </div>
 
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-zinc-800">
@@ -6147,7 +6231,7 @@ export default function App() {
                 Cerrar
               </button>
               <button
-                onClick={() => void connectFastApiServer()}
+                onClick={() => void handleConnectServer()}
                 disabled={serverStatus === 'connecting'}
                 className={`${accentClasses.bg} text-black font-extrabold text-xs px-5 py-2 rounded-xl transition flex items-center gap-1.5 shadow-lg`}
               >

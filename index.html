@@ -15,8 +15,8 @@
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
     <script>
-      // Registro de Service Worker para PWA Offline
-      if ('serviceWorker' in navigator) {
+      // Registro de Service Worker para PWA Offline; no aplica dentro de Capacitor.
+      if ('serviceWorker' in navigator && !(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform())) {
         window.addEventListener('load', () => {
           navigator.serviceWorker.register('/sw.js')
             .then((reg) => console.log('Thomas Music PWA Service Worker registrado:', reg.scope))

@@ -54,6 +54,51 @@ Con la aplicación abierta y conectada, usa el botón de descarga de cada canci�
 
 ---
 
+## 📱 APK Android (Capacitor)
+
+La app también se puede empaquetar como APK con **Capacitor 6**, compatible con el JDK 17 instalado. La versión Web/PWA sigue funcionando igual y no necesita Android Studio; el proyecto nativo vive en `android/`.
+
+### Compilar el APK de depuración
+
+Requisitos: JDK 17, Android SDK con `platforms;android-34` y `build-tools;34.0.0`, y la ruta del SDK en `ANDROID_HOME` o en `android/local.properties`.
+
+```powershell
+npm install
+npm run apk:debug
+```
+
+El APK queda en `android/app/build/outputs/apk/debug/app-debug.apk`. Durante el desarrollo:
+
+- `npm run cap:sync`: compila el frontend y copia `dist/` al proyecto Android.
+- `npm run cap:open`: abre `android/` en Android Studio.
+- `npm run apk:debug:unix`: variante del build para Linux/macOS.
+
+El APK de depuración sirve para probar en el teléfono; no está firmado para distribución. Para publicar hace falta un keystore y una build `release` firmada.
+
+> Si una versión anterior se cerraba al abrir la app o al escribir la IP, instala esta nueva APK. Corrige un `NullPointerException` interno de Capacitor 6 al cargar la URL raíz `https://localhost` y protege el cliente WebView para que una petición atípica no cierre la aplicación.
+
+### Conectar la APK con el backend
+
+La APK no incluye un backend local. Al abrirla por primera vez muestra el modal de servidor: escribe la dirección de la PC en la misma red, por ejemplo `http://192.168.0.36:8000`. La URL se guarda en el dispositivo y se puede cambiar después desde el menú de servidor. También se acepta escribir solo `192.168.0.36:8000`; la app añade `http://`.
+
+El backend debe escuchar en la red local y permitir el origen de Capacitor:
+
+```powershell
+$env:MUSIC_HOST = "0.0.0.0"
+$env:CORS_ORIGINS = "https://localhost,capacitor://localhost,http://localhost,http://localhost:5173"
+python server.py
+```
+
+Si el servidor sigue en `127.0.0.1`, el teléfono no podrá conectarse. Usa esto solo en una red de confianza y no expongas el puerto directamente a Internet.
+
+### Reproducción en segundo plano y DSP
+
+La APK incluye un servicio en primer plano `AudioForegroundService` de tipo `mediaPlayback`, permiso `WAKE_LOCK`, `resumeTimers()` en `onPause()` y una solicitud para excluir la app de la optimización de batería. Acepta la solicitud "Sin restricciones" si quieres evitar que Android corte la reproducción con la pantalla apagada. En Android 13 o superior concede también el permiso de notificaciones para que se muestre la notificación del servicio.
+
+En la APK se habilita Web Audio, por lo que el ecualizador DSP y el volumen superior al 100% siguen disponibles. En la PWA móvil se mantiene el audio directo, porque Android suspende el `AudioContext` en segundo plano. La continuidad real con pantalla apagada depende del fabricante y debe probarse en el teléfono; el servicio en primer plano reduce la probabilidad de que el sistema mate el proceso, pero no puede garantizar el comportamiento de todos los fabricantes.
+
+---
+
 ## 🎧 Uso con Intercomunicadores (Sena, Cardo, FreedConn, Lexin)
 1. Empareja tu intercomunicador por Bluetooth a tu celular.
 2. Abre **Diaz Music** y dale reproducir.
