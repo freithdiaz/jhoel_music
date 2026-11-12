@@ -1,6 +1,6 @@
 import pytest
 
-from telegram_match import best_match, candidate_line, quality_tier, receipt_matches_selection
+from telegram_match import best_match, candidate_line, quality_tier, receipt_matches_selection, declared_size_exceeds_limit
 
 
 def result(label, context, identifier='a' * 43, relation='indeterminado'):
@@ -21,6 +21,29 @@ def test_quality_prefers_320_over_128_when_title_matches():
     assert match is not None
     assert match['result']['id'] == 'b' * 43
     assert match['quality'] == 4
+
+
+def test_best_quality_within_declared_size_limit():
+    target = {'title': 'Imitadora', 'artist': 'Romeo Santos'}
+    context = ('Resultados\n1. Imitadora - Romeo Santos (320 kbps) 25 MB\n'
+               '2. Imitadora - Romeo Santos (256 kbps) 15 MB\n'
+               '3. Imitadora - Romeo Santos (128 kbps) 5 MB')
+    matches = [result(str(i), context, str(i) * 43) for i in range(1, 4)]
+    assert best_match(target, matches)['result']['id'] == '2' * 43
+
+
+def test_all_oversized_results_require_manual_choice():
+    target = {'title': 'Imitadora', 'artist': 'Romeo Santos'}
+    assert best_match(target, [result('Imitadora - Romeo Santos 320 kbps 25 MB', 'x')]) is None
+
+
+@pytest.mark.parametrize(('text', 'exceeds'), [
+    ('20 MiB', False), ('20,01 MiB', True), ('21 MB', True),
+    ('1024 KiB', False), ('0.1 GB', True), ('320 kbps', False),
+    ('tamaño desconocido', False),
+])
+def test_declared_sizes(text, exceeds):
+    assert declared_size_exceeds_limit(text) is exceeds
 
 
 def test_exact_title_and_artist_are_required():

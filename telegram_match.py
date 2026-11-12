@@ -7,11 +7,15 @@ formato real ni que el audio descargado corresponda a la canción elegida.
 import re
 import unicodedata
 from difflib import SequenceMatcher
+from decimal import Decimal, InvalidOperation
+
+from telegram_import import MAX_AUDIO_BYTES
 
 
 MAX_TEXT = 200
 QUALITY_RE = re.compile(r'\b(\d{2,4})\s*(?:kbps|kb\s*s|kbit|k)\b', re.I)
 DURATION_RE = re.compile(r'(?<!\d)(?:(\d{1,2}):)?(\d{1,2}):(\d{2})(?!\d)')
+FILE_SIZE_RE = re.compile(r'(?<![\w.,])(\d+(?:[.,]\d+)?)\s*(MiB|MB|KiB|KB|GiB|GB)(?!\w)', re.I)
 
 # El bot suele añadir tamaño, bitrate y un remitente desconocido. Se eliminan
 # antes de comparar el título, pero se conservan para mostrar/ordenar calidad.
@@ -101,6 +105,21 @@ def quality_tier(text):
     if re.search(r'\b(hq|high quality|alta calidad)\b', norm):
         return 2
     return 0
+
+
+def declared_size_exceeds_limit(text):
+    """Rechaza tamaños declarados superiores al límite; no verifica el archivo real."""
+    if not isinstance(text, str):
+        return False
+    factors = {'kb': 1000, 'kib': 1024, 'mb': 1000000, 'mib': 1048576,
+               'gb': 1000000000, 'gib': 1073741824}
+    for match in FILE_SIZE_RE.finditer(text):
+        try:
+            if Decimal(match.group(1).replace(',', '.')) * factors[match.group(2).lower()] > MAX_AUDIO_BYTES:
+                return True
+        except InvalidOperation:
+            continue
+    return False
 
 
 def duration_seconds(text):
@@ -196,6 +215,8 @@ def score_candidate(target, result):
         return None
     line = candidate_line(result)
     if line is None:
+        return None
+    if declared_size_exceeds_limit(line):
         return None
     candidate_norm = clean_candidate_text(line)
     if not candidate_norm:

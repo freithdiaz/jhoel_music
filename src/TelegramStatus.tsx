@@ -15,13 +15,16 @@ interface Props {
   onPlayImported: (item: Imported) => void;
   onAddImported: (item: Imported) => void;
   onDeletedImported: (filename: string) => void;
+  onDownloadImported?: (item: Imported) => void;
+  isImportedDownloaded?: (item: Imported) => boolean;
+  downloadingFilename?: string | null;
   importTarget?: TelegramImportTarget | null;
   onImportHandled?: (nonce?: number) => void;
   mode?: Mode;
 }
 
 /** Estado de integración: comprueba el puente al abrir y busca solo si el usuario eligió una canción. */
-export function TelegramStatus({ username, apiUrl, onPublished, onPlayImported, onAddImported, onDeletedImported, importTarget, onImportHandled, mode = 'full' }: Props) {
+export function TelegramStatus({ username, apiUrl, onPublished, onPlayImported, onAddImported, onDeletedImported, onDownloadImported, isImportedDownloaded, downloadingFilename, importTarget, onImportHandled, mode = 'full' }: Props) {
   const [status, setStatus] = useState<Status>('idle');
   const [refreshSignal, setRefreshSignal] = useState(0);
 
@@ -135,7 +138,7 @@ export function TelegramStatus({ username, apiUrl, onPublished, onPlayImported, 
           onPublished={(filename?: string) => { setRefreshSignal(value => value + 1); onPublished(filename); }}
         />
       )}
-      <TelegramImported apiUrl={apiUrl} username={username} canDelete={status === 'ready'} onPlay={onPlayImported} onAdd={onAddImported} onDeleted={onDeletedImported} refreshSignal={refreshSignal} />
+      <TelegramImported apiUrl={apiUrl} username={username} canDelete={status === 'ready'} onPlay={onPlayImported} onAdd={onAddImported} onDeleted={onDeletedImported} refreshSignal={refreshSignal} onDownload={onDownloadImported} isDownloaded={isImportedDownloaded} downloadingId={downloadingFilename} />
     </section>
   );
 }

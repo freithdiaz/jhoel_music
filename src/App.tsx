@@ -502,16 +502,14 @@ export default function App() {
   const listeningRef = useRef({ trackId: '', lastTime: 0, lastWall: 0, listened: 0, counted: false });
   const recentTracksRef = useRef<Track[]>([]);
   const nextRequestRef = useRef(0);
-  const relatedRequestRef = useRef<{ trackId: string; promise: Promise<Track[]> } | null>(null);
   const hasSelectedMusicRef = useRef(false);
   const [musicSelection, setMusicSelection] = useState(0);
-  const [relatedTracks, setRelatedTracks] = useState<Track[]>([]);
+  const [relatedTracks] = useState<Track[]>([]);
   const [regionalTracks, setRegionalTracks] = useState<Track[]>([]);
   const [prefetchedAutoDjTrack, setPrefetchedAutoDjTrack] = useState<Track | null>(null);
   const [backgroundImportTarget, setBackgroundImportTarget] = useState<TelegramImportTarget | null>(null);
   const [backgroundImportBusy, setBackgroundImportBusy] = useState(false);
   const waitingForPrefetchRef = useRef(false);
-  const prefetchAttemptedRef = useRef<Set<string>>(new Set());
   const [regionalLoading, setRegionalLoading] = useState(true);
   const [personalTracks, setPersonalTracks] = useState<Track[]>([]);
   const [musicRegion, setMusicRegion] = useState(() => localStorage.getItem('thomas_music_region') || 'CO');
@@ -1120,21 +1118,6 @@ export default function App() {
     window.addEventListener('offline', update);
     return () => { window.removeEventListener('online', update); window.removeEventListener('offline', update); };
   }, []);
-
-  // Prefetch suggestions without changing the song chosen by the listener.
-  useEffect(() => {
-    if (!autoRadioEnabled || activeAudioSource !== 'music' || !hasSelectedMusicRef.current) return;
-    let cancelled = false;
-    setRelatedTracks([]);
-    const query = recommendationQuery(currentMusicTrack, recentTracksRef.current.slice(-5).map(t => t.artist));
-    const request = { trackId: currentMusicTrack.id,
-      promise: searchYouTubeStream(fastApiUrl, query, AbortSignal.timeout(20000)).catch(() => [] as Track[]) };
-    relatedRequestRef.current = request;
-    request.promise.then(results => {
-      if (!cancelled) setRelatedTracks(results);
-    });
-    return () => { cancelled = true; if (relatedRequestRef.current === request) relatedRequestRef.current = null; };
-  }, [currentMusicTrack.id, musicSelection, autoRadioEnabled, activeAudioSource, fastApiUrl]);
 
   useEffect(() => {
     const colombia = musicRegion === 'CO' || (musicRegion === 'auto' && (navigator.languages?.some(lang => /-CO\b/i.test(lang)) || /-CO\b/i.test(navigator.language)));
@@ -2366,7 +2349,7 @@ export default function App() {
   };
 
   const handleNextTrack = async () => {
-    const requestId = ++nextRequestRef.current;
+    ++nextRequestRef.current;
     logDiagnostic('next', { source: activeAudioSource, title: currentMusicTrack.title });
     if (activeAudioSource === 'radio') {
       const currentIdx = radioStations.findIndex((s) => s.id === currentRadioStation.id);
@@ -2423,30 +2406,8 @@ export default function App() {
     }
 
     if (autoRadioEnabled) {
-      let candidates = rankRelated([...relatedTracks, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List].filter(t => !['jamendo', 'audius', 'itunes'].includes(t.sourceType) && !INITIAL_TRACKS.some(demo => demo.id === t.id && t.sourceType === 'curated') && (!unavailableTrackIds.has(t.id) || isDownloaded(t.id))), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id));
-      const request = relatedRequestRef.current;
-      if (!candidates.length && request?.trackId === currentMusicTrack.id) {
-        showToast('Buscando canciones relacionadas…');
-        const results = await request.promise;
-        if (requestId !== nextRequestRef.current) return;
-        candidates = rankRelated([...results, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List].filter(t => !['jamendo', 'audius', 'itunes'].includes(t.sourceType) && !INITIAL_TRACKS.some(demo => demo.id === t.id && t.sourceType === 'curated') && (!unavailableTrackIds.has(t.id) || isDownloaded(t.id))), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id));
-      }
+      const candidates = rankRelated(availableAutoDjTracks(), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id));
       if (candidates[0]) {
-        if (isYouTubeResult(candidates[0])) {
-          const target = buildTelegramImport(candidates[0], Date.now());
-          if (target) {
-            waitingForPrefetchRef.current = true;
-            cancelStandbyPrime();
-            audioRef.current?.pause();
-            playbackIntentRef.current.pause();
-            setIsPlaying(false);
-            setBackgroundImportBusy(true);
-            setBackgroundImportTarget(target);
-            setIsBuffering(true);
-            showToast(`Descargando «${target.title}» para la siguiente…`);
-            return;
-          }
-        }
         playSong(candidates[0]);
         return;
       }
@@ -2454,7 +2415,7 @@ export default function App() {
       audioRef.current?.pause();
       playbackIntentRef.current.pause();
       setIsPlaying(false);
-      showToast('No encontramos otra canción relacionada. Busca más música o desactiva Auto-DJ para seguir la lista.');
+      showToast('No hay más canciones relacionadas disponibles en tu biblioteca.');
       return;
     }
     const nextIdx = (currentTrackIndex + 1) % tracks.length;
@@ -2962,17 +2923,20 @@ export default function App() {
     }
     return undefined;
   })();
+  const availableAutoDjTracks = () => [...offlineTracks, ...tracks].filter(track =>
+    (track.sourceType === 'fastapi' || track.sourceType === 'local-file' || isDownloaded(track.id))
+    && !isYouTubeResult(track)
+    && (!unavailableTrackIds.has(track.id) || isDownloaded(track.id))
+  );
   const nextSuggestion = activeAudioSource === 'music' && hasSelectedMusicRef.current
-    ? nextInPlaylist || (autoRadioEnabled ? rankRelated([...relatedTracks, ...personalTracks, ...onlineSearchResults, ...tracks, ...favorites50List].filter(t => !['jamendo', 'audius', 'itunes'].includes(t.sourceType) && !INITIAL_TRACKS.some(demo => demo.id === t.id && t.sourceType === 'curated') && (!unavailableTrackIds.has(t.id) || isDownloaded(t.id))), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id))[0] : undefined)
+    ? nextInPlaylist || (autoRadioEnabled ? rankRelated(availableAutoDjTracks(), currentMusicTrack, userTasteProfile, recentTracksRef.current.slice(-8).map(t => t.id))[0] : undefined)
     : undefined;
 
-  const automaticUpcoming = prefetchedAutoDjTrack
-    || nextSuggestion
-    || (tracks.length > 1 ? tracks[(currentTrackIndex + 1) % tracks.length] : undefined);
+  const automaticUpcoming = prefetchedAutoDjTrack || nextSuggestion;
   const upcomingMusicTrack = nextInPlaylist
     || (automaticUpcoming && automaticUpcoming.id !== currentMusicTrack.id ? automaticUpcoming : undefined);
-  // Auto-DJ descarga los resultados de YouTube desde Telegram antes de
-  // reproducirlos; una cola explícita sí puede usar /stream_yt directamente.
+  // Una cola explícita puede contener resultados de YouTube; Auto-DJ solo
+  // propone pistas que ya están en la biblioteca o descargadas localmente.
   const upcomingNeedsTelegramImport = !nextInPlaylist && !prefetchedAutoDjTrack
     && !!nextSuggestion && isYouTubeResult(nextSuggestion);
 
@@ -2994,30 +2958,6 @@ export default function App() {
     }
   }, [isPlaying, activeAudioSource, currentMusicTrack.id, musicSelection, useSynthFallback,
       backgroundImportBusy, !!nextInPlaylist, upcomingMusicTrack?.id, upcomingNeedsTelegramImport]);
-
-  useEffect(() => {
-    // Una siguiente pista de una cola explícita ya se reproduce con /stream_yt;
-    // no hace falta descargarla también desde Telegram en segundo plano.
-    if (nextInPlaylist) return;
-    if (!autoRadioEnabled || activeAudioSource !== 'music' || !isPlaying || !hasSelectedMusicRef.current) return;
-    if (!nextSuggestion || !isYouTubeResult(nextSuggestion)) return;
-    if (telegramImportTarget || backgroundImportBusy || prefetchedAutoDjTrack) return;
-    const key = `${currentMusicTrack.id}->${nextSuggestion.id}`;
-    if (prefetchAttemptedRef.current.has(key)) return;
-    const target = buildTelegramImport(nextSuggestion, Date.now());
-    if (!target) return;
-    // Espera unos segundos para no competir con la reproducción o la importación
-    // de la canción actual; después descarga la siguiente en segundo plano.
-    const timer = window.setTimeout(() => {
-      if (backgroundImportBusy || telegramImportTarget) return;
-      prefetchAttemptedRef.current.add(key);
-      setBackgroundImportBusy(true);
-      setBackgroundImportTarget(target);
-      showToast(`Preparando «${target.title}» mientras escuchas…`);
-    }, 6000);
-    return () => window.clearTimeout(timer);
-  }, [autoRadioEnabled, activeAudioSource, isPlaying, currentMusicTrack.id, nextSuggestion?.id,
-      !!nextInPlaylist, telegramImportTarget, backgroundImportBusy, prefetchedAutoDjTrack?.id]);
 
   const clearStallTimer = () => {
     if (stallTimerRef.current) {
@@ -3745,7 +3685,7 @@ export default function App() {
                   <p className="mt-1 text-xs font-semibold text-zinc-100 truncate">{nextSuggestion.title}</p>
                   <p className="text-[11px] text-zinc-400 truncate">{nextSuggestion.artist}</p>
                   <p className={`mt-1.5 text-[10px] ${accentClasses.text}`}>{nextInPlaylist ? `Playlist: ${playbackQueue?.name}` : relatedReason(currentMusicTrack, nextSuggestion)}</p>
-                </> : <p className="mt-1 text-xs leading-relaxed text-zinc-400">Elige una canción para encontrar música relacionada. Las sugerencias dependen del catálogo disponible.</p>}
+                </> : <p className="mt-1 text-xs leading-relaxed text-zinc-400">Auto-DJ utiliza únicamente canciones relacionadas que ya están en tu biblioteca o descargadas.</p>}
               </div>}
 
               {/* Historial Scrobble */}
@@ -5192,7 +5132,7 @@ export default function App() {
               </div>
 
               {activeTab === 'vault' && (
-                <TelegramStatus key={`library:${currentUser?.username || ''}:${fastApiUrl}`} mode="library" username={currentUser?.username} apiUrl={fastApiUrl} onPublished={(filename) => void onTelegramPublished(filename)} onPlayImported={playTelegramImport} onAddImported={item => setPlaylistModalTrack(telegramImportTrack(item))} onDeletedImported={onTelegramImportDeleted} />
+                <TelegramStatus key={`library:${currentUser?.username || ''}:${fastApiUrl}`} mode="library" username={currentUser?.username} apiUrl={fastApiUrl} onPublished={(filename) => void onTelegramPublished(filename)} onPlayImported={playTelegramImport} onAddImported={item => setPlaylistModalTrack(telegramImportTrack(item))} onDeletedImported={onTelegramImportDeleted} onDownloadImported={IS_NATIVE_APP ? item => { const track = telegramImportTrack(item); if (!isDownloaded(track.id)) void toggleOfflineVault(track.id, undefined, track); } : undefined} isImportedDownloaded={item => isDownloaded(telegramImportTrack(item).id)} downloadingFilename={downloadingId?.startsWith('fastapi-telegram-') ? `telegram-${downloadingId.slice('fastapi-telegram-'.length)}.mp3` : null} />
               )}
 
               <div className="space-y-1.5">

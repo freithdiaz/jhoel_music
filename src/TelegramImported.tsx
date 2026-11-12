@@ -1,10 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ListPlus, Play, RefreshCw, Trash2 } from 'lucide-react';
+import { CheckCircle2, Download, ListPlus, Play, RefreshCw, Trash2 } from 'lucide-react';
 import { getServerToken } from './services/authService';
 
 export type Imported = { filename: string; title: string; artist: string; album: string; genre: string; coverUrl: string };
 
-export function TelegramImported({ apiUrl, username, canDelete, onPlay, onAdd, onDeleted, refreshSignal }: { apiUrl: string; username?: string; canDelete: boolean; onPlay: (item: Imported) => void; onAdd: (item: Imported) => void; onDeleted: (filename: string) => void; refreshSignal: number }) {
+export function TelegramImported({ apiUrl, username, canDelete, onPlay, onAdd, onDeleted, refreshSignal, onDownload, isDownloaded, downloadingId }: { apiUrl: string; username?: string; canDelete: boolean; onPlay: (item: Imported) => void; onAdd: (item: Imported) => void; onDeleted: (filename: string) => void; refreshSignal: number; onDownload?: (item: Imported) => void; isDownloaded?: (item: Imported) => boolean; downloadingId?: string | null }) {
   const [items, setItems] = useState<Imported[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -130,6 +130,12 @@ export function TelegramImported({ apiUrl, username, canDelete, onPlay, onAdd, o
         {item.coverUrl ? <img src={item.coverUrl} alt="" className="h-12 w-12 shrink-0 rounded-md object-cover" /> : <Play className="h-4 w-4 shrink-0 text-emerald-400" />}
         <span className="min-w-0"><span className="block break-words font-semibold">{item.title}</span><span className="mt-0.5 block text-xs text-zinc-400">{item.artist} · {item.genre}</span></span>
         </button>
+        {onDownload && <button type="button" onClick={() => onDownload(item)} disabled={isDownloaded?.(item) || !!downloadingId}
+          aria-label={isDownloaded?.(item) ? `${item.title} descargada en este dispositivo` : `Descargar ${item.title} en este dispositivo`}
+          title={isDownloaded?.(item) ? 'Ya descargada en este dispositivo' : 'Descargar en este dispositivo'}
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-emerald-400 hover:bg-zinc-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-emerald-400 disabled:opacity-60">
+          {downloadingId === item.filename ? <RefreshCw className="h-4 w-4 animate-spin" /> : isDownloaded?.(item) ? <CheckCircle2 className="h-4 w-4" /> : <Download className="h-4 w-4" />}
+        </button>}
         <button type="button" onClick={() => onAdd(item)} aria-label={`Añadir ${item.title} a una playlist`} title="Añadir a playlist"
           className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-zinc-300 hover:bg-zinc-700 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-emerald-400"><ListPlus className="h-4 w-4" /></button>
         <button type="button" onClick={() => void remove(item)} disabled={!canDelete || !!deletion} aria-label={`Eliminar ${item.title} del servidor`} title={canDelete ? 'Eliminar copia del servidor' : 'Comprueba primero el puente'}

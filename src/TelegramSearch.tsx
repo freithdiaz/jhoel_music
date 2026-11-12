@@ -297,6 +297,7 @@ export function TelegramSearch({ username, apiUrl, onPublished, importTarget, on
         <button disabled={busy || !!jobId || !query.trim()} className="min-h-10 rounded-lg bg-emerald-400 px-4 text-sm font-bold text-zinc-950 disabled:opacity-40">Buscar</button>
       </form>}
       {jobId && <p className="text-xs text-zinc-400" aria-live="polite">{job ? descriptions[job.state] || 'Estado no reconocido; comprueba el servidor.' : 'Consultando estado…'}</p>}
+      {job && ['selection_claimed', 'callback_confirmed', 'uncertain'].includes(job.state) && <p className="text-xs text-zinc-400">Los audios de más de 20 MB no son compatibles con la descarga actual del puente. Si la espera no termina, el tamaño puede ser una causa; comprueba también el grupo de Telegram.</p>}
       {autoWorking && job?.selection && (
         <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-200" aria-live="polite">
           <span className="font-semibold">Elegida automáticamente:</span> {job.selection.label}
